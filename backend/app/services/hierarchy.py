@@ -59,6 +59,17 @@ class HierarchyService:
             raise ValueError(f"Run '{run_id}' does not exist")
 
         agents = self.database.get_agents_for_run(run_id)
+        for agent in agents:
+            policy = BRANCH_POLICIES[agent["role"]]
+            agent["policy"] = {
+                "role": agent["role"],
+                "allowed_tools": sorted(set(agent["allowed_tools"]).intersection(policy.allowed_tools)),
+                "customer_id": policy.customer_id,
+                "order_id": policy.order_id,
+                "max_amount_cents": policy.max_amount_cents,
+                "commit_on_verified_completion": policy.commit_on_verified_completion,
+                "abort_on_scope_violation": policy.abort_on_scope_violation,
+            }
         roots = [agent for agent in agents if agent["parent_agent_id"] is None]
         ordered = []
         for root in roots:
@@ -90,6 +101,7 @@ class HierarchyService:
             "status": agent["status"],
             "task_state": agent["task_state"],
             "allowed_tools": agent["allowed_tools"],
+            "policy": agent["policy"],
             "parent_agent_id": agent["parent_agent_id"],
             "children": [self._build_tree(child, agents) for child in children],
         }
