@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from backend.app.services.demo_policy import BRANCH_POLICIES
+
 
 class HierarchyService:
     def __init__(self, database):
@@ -33,7 +35,16 @@ class HierarchyService:
         if parent_agent_id is not None and self._creates_cycle(run_id, agent_id, parent_agent_id):
             raise ValueError("Cyclic hierarchy is not allowed")
 
-        tools = allowed_tools or []
+        policy = BRANCH_POLICIES.get(role)
+        if policy is None:
+            raise ValueError(f"Unsupported agent role '{role}'")
+        if parent_agent_id is None and role != "parent":
+            raise ValueError("Only a parent agent can be a run root")
+        if parent_agent_id is not None and role not in {"order", "account"}:
+            raise ValueError("Children must use a predefined order or account role")
+        # Agent registration may narrow a trusted role template, but it cannot
+        # grant tools that the application policy does not permit.
+        tools = sorted(set(allowed_tools or []).intersection(policy.allowed_tools))
         self.database.create_agent(
             run_id=run_id,
             agent_id=agent_id,

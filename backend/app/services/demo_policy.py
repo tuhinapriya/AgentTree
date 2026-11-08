@@ -59,14 +59,14 @@ TOOL_MODIFY_BILLING = "modify_billing"
 BRANCH_POLICIES: dict[str, BranchPolicy] = {
     "parent": BranchPolicy(allowed_tools=frozenset()),
     "order": BranchPolicy(
-        allowed_tools=frozenset({TOOL_READ_ORDER, TOOL_STAGE_REFUND}),
+        allowed_tools=frozenset({TOOL_READ_ORDER, TOOL_STAGE_REFUND, "read_orders", "process_order"}),
         customer_id=CUSTOMER_ID,
         order_id=ORDER_ID,
         max_amount_cents=ORDER_REFUND_CENTS,
         commit_on_verified_completion=True,
     ),
     "account": BranchPolicy(
-        allowed_tools=frozenset({TOOL_READ_ACCOUNT, TOOL_STAGE_PROMO_CREDIT}),
+        allowed_tools=frozenset({TOOL_READ_ACCOUNT, TOOL_STAGE_PROMO_CREDIT, "read_account"}),
         customer_id=CUSTOMER_ID,
         max_amount_cents=PROMO_CREDIT_CENTS,
         commit_on_verified_completion=True,

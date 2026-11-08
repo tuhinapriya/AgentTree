@@ -77,3 +77,62 @@ def test_revoked_session_and_non_running_branch_are_denied(tmp_path):
             "SELECT revoked_at FROM agent_sessions WHERE run_id = ?", (run_id,)
         ).fetchone()[0]
     assert revoked_at is not None
+
+
+def test_trusted_policy_limits_resources_tools_and_staged_amounts(tmp_path):
+    database_path = str(tmp_path / "policy.db")
+    app = build_app(database_path)
+    client = TestClient(app)
+    run_id = "policy-run"
+    assert client.post("/runs", json={"run_id": run_id}).status_code == 200
+    for agent_id, role, parent_id, tools in [
+        ("parent-agent", "parent", None, []),
+        ("order-agent", "order", "parent-agent", ["stage_refund", "read_order"]),
+        ("account-agent", "account", "parent-agent", ["read_account", "stage_promo_credit", "modify_billing"]),
+    ]:
+        assert client.post(
+            f"/runs/{run_id}/agents",
+            json={"agent_id": agent_id, "role": role, "parent_agent_id": parent_id, "allowed_tools": tools},
+        ).status_code == 200
+    credential = client.post(
+        f"/runs/{run_id}/gateway/credentials", json={"agent_id": "account-agent"}
+    ).json()["credential"]
+
+    forbidden_tool = client.post(
+        f"/runs/{run_id}/gateway/execute",
+        json={"agent_id": "account-agent", "credential": credential,
+              "tool": "modify_billing", "arguments": {"customer_id": "C104", "amount": 25}},
+    )
+    wrong_customer = client.post(
+        f"/runs/{run_id}/gateway/execute",
+        json={"agent_id": "account-agent", "credential": credential,
+              "tool": "read_account", "arguments": {"customer_id": "C999"}},
+    )
+    too_much = client.post(
+        f"/runs/{run_id}/gateway/execute",
+        json={"agent_id": "account-agent", "credential": credential,
+              "tool": "stage_promo_credit", "arguments": {"customer_id": "C104", "amount_cents": 5001}},
+    )
+    staged = client.post(
+        f"/runs/{run_id}/gateway/execute",
+        json={"agent_id": "account-agent", "credential": credential,
+              "tool": "stage_promo_credit", "arguments": {"customer_id": "C104", "amount_cents": 5000}},
+    )
+
+    assert forbidden_tool.status_code == 403
+    assert wrong_customer.status_code == 403
+    assert too_much.status_code == 403
+    assert staged.status_code == 200
+    assert staged.json()["result"]["executed"] is False
+    with AgentTreeDB(database_path)._connect() as connection:
+        committed = connection.execute(
+            "SELECT promo_credit_cents FROM business_accounts WHERE run_id = ? AND customer_id = 'C104'",
+            (run_id,),
+        ).fetchone()[0]
+        journal = connection.execute(
+            "SELECT COUNT(*) FROM journal WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+    assert committed == 0
+    assert journal == 1
+    account_agent = AgentTreeDB(database_path).get_agent(run_id, "account-agent")
+    assert "modify_billing" not in account_agent["allowed_tools"]

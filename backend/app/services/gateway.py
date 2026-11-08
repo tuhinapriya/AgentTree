@@ -6,14 +6,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.app.services.demo_policy import (
+    BRANCH_POLICIES,
     BranchState,
     KNOWN_TOOLS,
 )
+from backend.app.services.staging import StagingService
 
 
 class GatewayService:
     def __init__(self, database):
         self.database = database
+        self.staging = StagingService(database)
         self.events: dict[str, list[dict[str, Any]]] = {}
         self.business_db = self._initial_business_state()
 
@@ -111,7 +114,8 @@ class GatewayService:
             self.record_event(run_id, agent_id, tool_name, "DENY", "UNKNOWN_TOOL", origin)
             raise KeyError(f"Unknown tool '{tool_name}'")
 
-        if tool_name not in agent["allowed_tools"]:
+        policy = BRANCH_POLICIES.get(agent["role"])
+        if policy is None or tool_name not in policy.allowed_tools or tool_name not in agent["allowed_tools"]:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
             raise PermissionError("Permission denied")
 
@@ -119,7 +123,14 @@ class GatewayService:
             self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_ARGUMENTS", origin)
             raise ValueError("Tool arguments must be an object")
 
-        result = self._dispatch_tool(tool_name, arguments)
+        try:
+            result = self._dispatch_tool(run_id, session[1], tool_name, arguments, origin)
+        except PermissionError:
+            self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
+            raise
+        except ValueError:
+            self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_ARGUMENTS", origin)
+            raise
         self.record_event(run_id, agent_id, tool_name, "ALLOW", None, origin)
         return result
 
@@ -223,7 +234,28 @@ class GatewayService:
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def _dispatch_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _dispatch_tool(
+        self, run_id: str, branch_id: str, tool_name: str,
+        arguments: dict[str, Any], origin: str,
+    ) -> dict[str, Any]:
+        if tool_name == "read_order":
+            order_id = self._require_str(arguments, "order_id")
+            return {"tool": tool_name, "result": self.staging.read_order(run_id, branch_id, order_id)}
+
+        if tool_name == "stage_refund":
+            order_id = self._require_str(arguments, "order_id")
+            amount_cents = arguments.get("amount_cents")
+            staged = self.staging.stage_refund(run_id, branch_id, order_id, amount_cents, origin=origin)
+            return {"tool": tool_name, "result": staged}
+
+        if tool_name == "stage_promo_credit":
+            customer_id = self._require_str(arguments, "customer_id")
+            amount_cents = arguments.get("amount_cents")
+            staged = self.staging.stage_promo_credit(
+                run_id, branch_id, customer_id, amount_cents, origin=origin
+            )
+            return {"tool": tool_name, "result": staged}
+
         if tool_name == "read_orders":
             order_id = self._require_str(arguments, "order_id")
             order = self.business_db["orders"].get(order_id)
@@ -244,10 +276,13 @@ class GatewayService:
 
         if tool_name == "read_account":
             customer_id = self._require_str(arguments, "customer_id")
-            account = self.business_db["accounts"].get(customer_id)
-            if account is None:
-                raise KeyError(f"Account '{customer_id}' was not found")
-            return {"tool": tool_name, "result": dict(account)}
+            if customer_id != "C104":
+                raise PermissionError("Permission denied")
+            account = self.staging.read_account(run_id, branch_id, customer_id)
+            # Preserve the legacy display fields while exposing the
+            # transaction-specific committed/provisional values.
+            account.update({"plan": "basic", "balance": 100.0})
+            return {"tool": tool_name, "result": account}
 
         if tool_name == "modify_billing":
             customer_id = self._require_str(arguments, "customer_id")

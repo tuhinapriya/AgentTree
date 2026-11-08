@@ -344,7 +344,9 @@ class StagingService:
         origin: str,
     ) -> dict[str, Any]:
         self._require_run(run_id)
-        policy = BRANCH_POLICIES.get(branch_id.removesuffix("-agent"))
+        agent = self.database.get_agent(run_id, branch_id)
+        policy_key = agent["role"] if agent is not None else branch_id.removesuffix("-agent")
+        policy = BRANCH_POLICIES.get(policy_key)
         if policy is None or tool not in policy.allowed_tools:
             raise PermissionError("Tool is not allowed for this branch")
         if resource_id != (policy.order_id if tool == TOOL_STAGE_REFUND else policy.customer_id):
