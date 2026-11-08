@@ -602,3 +602,18 @@ This roadmap is the execution checklist for the current repository. Each numbere
 - Use imperative, scoped messages such as `Add persisted demo business fixtures` and `Stage branch refund actions`.
 - Before each commit, inspect the diff, keep unrelated user files out of it, and record the exact verification performed. Do not commit credentials, local databases, caches, generated build output, or unrelated workspace changes.
 - Keep the demo runnable throughout. Prefer a completed vertical slice over half-implemented layers, and make each visible state transition traceable to persisted backend state.
+
+---
+
+## 12. Implementation status and acceptance record
+
+**Roadmap A–F is implemented.** The work was committed in small local commits on `main`, from `Define trusted transactional demo policy` through `Document setup and repeatable demo workflow`. The reset/replay acceptance run exposed and fixed a missing root-branch reset; replay is now covered by a backend test.
+
+**Acceptance evidence (2026-11-07):**
+
+- Backend suite: `44 passed` (`pytest -q backend/tests`). Includes stage/overlay, commit retry, abort-before-commit, credential replay, scope containment, sibling continuation, process crash detection, cleanup, and reset/replay.
+- Frontend: `4 passed` (`npm test`); production TypeScript/Vite build passes (`npm run build`).
+- Three consecutive local CLI rehearsals from the same stable run ID each showed Order `$45` `STAGED → COMMITTED`, Account `$50` `STAGED → ABORTED`, committed promo credit `$0`, Account process `STOPPED` with exit code `0`, and Order still `RUNNING`. Remaining workers were then cleaned up.
+- Amazon Bedrock Converse and a model-proposed tool-use request were smoke-tested separately. The three full presentation rehearsals intentionally use `CONTROLLED_TEST`; they do not claim the model generated the unauthorized request.
+
+**Scope boundary:** a full Bedrock-driven worker run through commit was not part of the three clean presentation rehearsals. External API side effects remain outside SQLite atomic commit, and AgentTree is not an operating-system sandbox. Setup, commands, AWS prerequisites, and these limits are documented in the repository `README.md`.
