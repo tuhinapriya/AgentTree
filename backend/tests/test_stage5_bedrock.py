@@ -101,5 +101,8 @@ def test_gateway_records_controlled_test_denials_and_keeps_business_state_intact
             "arguments": {"customer_id": "C104"},
         },
     )
-    assert balance_response.status_code == 200
-    assert balance_response.json()["result"]["balance"] == 100.0
+    assert balance_response.status_code == 403
+    state_response = client.get("/runs/run-stage5-events/demo/state")
+    assert state_response.status_code == 200
+    assert state_response.json()["account"]["balance"] == 100.0
+    assert state_response.json()["transactional"]["account"]["promo_credit_cents"] == 0

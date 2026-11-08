@@ -147,3 +147,42 @@ def test_transactional_demo_vertical_slice_over_api(tmp_path):
     assert refreshed_state["business_state"] == effects["business_state"]
     assert len(refreshed.get(f"/runs/{run_id}/events").json()["events"]) == len(events)
     client.post(f"/runs/{run_id}/cleanup")
+
+
+def test_demo_reset_rearms_branches_and_clears_pending_data(tmp_path):
+    database_path = str(tmp_path / "demo-reset-replay.db")
+    client = TestClient(build_app(database_path))
+    run_id = "demo-reset-replay"
+    assert client.post("/runs", json={"run_id": run_id}).status_code == 200
+    for agent_id, role, parent_id, tools in [
+        ("parent-agent", "parent", None, []),
+        ("order-agent", "order", "parent-agent", ["read_order", "stage_refund"]),
+        ("account-agent", "account", "parent-agent", ["read_account", "stage_promo_credit"]),
+    ]:
+        assert client.post(
+            f"/runs/{run_id}/agents",
+            json={"agent_id": agent_id, "role": role, "parent_agent_id": parent_id, "allowed_tools": tools},
+        ).status_code == 200
+    token = client.post(
+        f"/runs/{run_id}/gateway/credentials", json={"agent_id": "account-agent"}
+    ).json()["credential"]
+    assert client.post(
+        f"/runs/{run_id}/gateway/execute",
+        json={"agent_id": "account-agent", "credential": token, "tool": "stage_promo_credit",
+              "arguments": {"customer_id": "C104", "amount_cents": 5000}},
+    ).status_code == 200
+    assert client.post(f"/runs/{run_id}/branches/account-agent/stop").status_code == 200
+
+    assert client.post(f"/runs/{run_id}/cleanup").status_code == 200
+    assert client.post(f"/runs/{run_id}/demo/reset").status_code == 200
+
+    effects = client.get(f"/runs/{run_id}/effects").json()
+    assert effects["effects"] == []
+    assert all(branch["state"] == "RUNNING" for branch in effects["branches"])
+    assert effects["business_state"]["account"]["promo_credit_cents"] == 0
+    stale_credential = client.post(
+        f"/runs/{run_id}/gateway/execute",
+        json={"agent_id": "account-agent", "credential": token, "tool": "read_account",
+              "arguments": {"customer_id": "C104"}},
+    )
+    assert stale_credential.status_code == 401
