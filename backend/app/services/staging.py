@@ -125,7 +125,13 @@ class StagingService:
             origin=origin,
         )
 
-    def mark_ready_to_commit(self, run_id: str, branch_id: str, verified_completion: bool) -> dict[str, Any]:
+    def mark_ready_to_commit(
+        self,
+        run_id: str,
+        branch_id: str,
+        verified_completion: bool,
+        origin: str = EventOrigin.SUPERVISOR.value,
+    ) -> dict[str, Any]:
         """Accept supervisor-verified completion; workers cannot commit directly."""
         self._require_run(run_id)
         if verified_completion is not True:
@@ -151,7 +157,7 @@ class StagingService:
                 (BranchState.READY_TO_COMMIT.value, timestamp, run_id, branch_id),
             )
             self._append_event(connection, run_id, branch_id, f"{branch_id}-agent",
-                               EventOrigin.SUPERVISOR.value, "COMMIT_ELIGIBLE", {}, timestamp)
+                               origin, "COMMIT_ELIGIBLE", {}, timestamp)
             connection.commit()
         return {"run_id": run_id, "branch_id": branch_id, "state": BranchState.READY_TO_COMMIT.value}
 

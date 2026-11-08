@@ -12,6 +12,7 @@ from backend.app.services.bedrock import BedrockService
 from backend.app.services.gateway import GatewayService
 from backend.app.services.hierarchy import HierarchyService
 from backend.app.services.supervisor import SupervisorService
+from backend.app.services.staging import StagingService
 
 
 class RunCreate(BaseModel):
@@ -31,6 +32,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
     service = HierarchyService(database)
     supervisor = SupervisorService(database)
     gateway = GatewayService(database, supervisor)
+    staging = StagingService(database)
     bedrock = BedrockService(database)
     observability = AWSObservabilityService(database)
     app = FastAPI(title="AgentTree")
@@ -154,6 +156,24 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
             return {"run_id": run_id, "branch_id": branch_id, "status": "STOPPED", "agents": branch_members}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/branches/{branch_id}/complete")
+    def complete_demo_branch(run_id: str, branch_id: str) -> dict[str, Any]:
+        try:
+            return staging.mark_ready_to_commit(
+                run_id, branch_id, verified_completion=True, origin="OPERATOR"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/branches/{branch_id}/commit")
+    def commit_demo_branch(run_id: str, branch_id: str) -> dict[str, Any]:
+        try:
+            return staging.commit_branch(run_id, branch_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/runs/{run_id}/bedrock/delegate")
     def delegate_with_bedrock(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
