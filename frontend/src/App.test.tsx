@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
 
@@ -38,6 +39,14 @@ const mockDashboard = {
         status: 'BLOCKED',
         parent_agent_id: 'parent-agent',
         allowed_tools: ['read_account'],
+        policy: {
+          role: 'account',
+          allowed_tools: ['read_account', 'stage_promo_credit'],
+          customer_id: 'C104',
+          max_amount_cents: 5000,
+          commit_on_verified_completion: true,
+          abort_on_scope_violation: true,
+        },
       },
     ],
     edges: [
@@ -109,10 +118,14 @@ test('renders the tree, database result, and timeline', async () => {
   expect(screen.getByRole('heading', { name: /timeline/i })).toBeInTheDocument()
 })
 
-test('shows the agent tree and removes redundant operator controls', async () => {
+test('selecting an agent shows its effective permissions', async () => {
+  const user = userEvent.setup()
   render(<App />)
 
   await screen.findByRole('heading', { name: /customer transaction demo/i })
-  expect(screen.getByText(/how this demo is configured/i)).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: /account agent/i }))
+  expect(screen.getByRole('heading', { name: /account agent permissions/i })).toBeInTheDocument()
+  expect(screen.getByText(/customer c104/i)).toBeInTheDocument()
+  expect(screen.getByText(/stage promo credit/i)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /refresh|reset demo|contain branch/i })).not.toBeInTheDocument()
 })
