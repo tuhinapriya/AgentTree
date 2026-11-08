@@ -1,7 +1,9 @@
 import json
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -37,6 +39,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
     bedrock = BedrockService(database)
     observability = AWSObservabilityService(database)
     app = FastAPI(title="AgentTree")
+    demo_jobs: dict[str, dict[str, Any]] = {}
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -63,6 +66,36 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
             return service.create_run(payload.run_id, payload.scenario)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def execute_live_demo(run_id: str, base_url: str) -> None:
+        demo_jobs[run_id] = {"status": "RUNNING", "started_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            from demo.run_live_demo import run_live_demo
+
+            run_live_demo(base_url, run_id)
+            demo_jobs[run_id] = {
+                "status": "SUCCEEDED",
+                "started_at": demo_jobs[run_id]["started_at"],
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            demo_jobs[run_id] = {
+                "status": "FAILED",
+                "started_at": demo_jobs[run_id]["started_at"],
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(exc),
+            }
+
+    @app.post("/demo/live")
+    def start_live_demo(background_tasks: BackgroundTasks, request: Request) -> dict[str, str]:
+        run_id = f"agenttree-live-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        try:
+            service.create_run(run_id, "customer-104-bedrock-live")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        demo_jobs[run_id] = {"status": "STARTING", "started_at": datetime.now(timezone.utc).isoformat()}
+        background_tasks.add_task(execute_live_demo, run_id, str(request.base_url).rstrip("/"))
+        return {"run_id": run_id, "status": "STARTING"}
 
     @app.post("/runs/{run_id}/agents")
     def create_agent(run_id: str, payload: AgentCreate) -> dict[str, Any]:
@@ -270,6 +303,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
             return {
                 "run_id": run_id,
                 "run": database.get_run(run_id),
+                "demo_execution": demo_jobs.get(run_id, {"status": "IDLE"}),
                 "hierarchy": service.get_hierarchy(run_id),
                 "events": gateway.get_events(run_id),
                 "effects": staging.get_effects(run_id),

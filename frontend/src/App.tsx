@@ -55,6 +55,7 @@ type BusinessState = {
 type DashboardPayload = {
   run_id: string
   run?: { run_id: string; scenario: string; status: string; created_at: string }
+  demo_execution?: { status: string; started_at?: string; finished_at?: string; error?: string }
   hierarchy: { run_id: string; tree?: AgentNode[]; nodes?: AgentNode[]; agents?: AgentNode[]; edges?: Array<{ source: string; target: string }> }
   events: EventEntry[]
   effects?: { effects: Effect[]; branches: Branch[] }
@@ -77,6 +78,7 @@ function App() {
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState('order-agent')
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [launchingDemo, setLaunchingDemo] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const runIdRef = useRef(runId)
   const requestInFlight = useRef(false)
@@ -105,6 +107,20 @@ function App() {
       setError(lastError ?? 'Unable to load dashboard data.')
     } finally {
       requestInFlight.current = false
+    }
+  }
+  const handleStartLiveDemo = async () => {
+    setLaunchingDemo(true)
+    setError(null)
+    try {
+      const started = await fetchJson<{ run_id: string }>('/demo/live', { method: 'POST' })
+      runIdRef.current = started.run_id
+      setRunId(started.run_id)
+      await loadDashboard(started.run_id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to start the live demo.')
+    } finally {
+      setLaunchingDemo(false)
     }
   }
   useEffect(() => { void loadDashboard(runIdRef.current, true) }, [])
@@ -169,6 +185,7 @@ function App() {
   const blockedCalls = toolCalls.filter((event) => event.decision === 'DENY').length
   const selectedPolicy = selectedAgent?.policy
   const allowedTools = selectedPolicy?.allowed_tools ?? selectedAgent?.allowed_tools ?? []
+  const demoIsActive = ['STARTING', 'RUNNING'].includes(dashboard?.demo_execution?.status ?? '')
   const branchRule = selectedPolicy?.abort_on_scope_violation
     ? 'Abort branch and discard staged changes after a scope violation'
     : selectedPolicy?.commit_on_verified_completion
@@ -178,9 +195,10 @@ function App() {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand-lockup"><div className="brand-mark">A</div><div><p className="eyebrow">AgentTree / Runtime security</p><h1>Customer transaction demo</h1></div></div>
-      <span className="run-id-label">{dashboard?.run_id ?? runId}</span>
+      <div className="header-actions"><span className="run-id-label">{dashboard?.run_id ?? runId}</span><button type="button" className="run-demo-button" title="Starts a fresh Bedrock run and keeps previous run history." onClick={() => void handleStartLiveDemo()} disabled={launchingDemo || demoIsActive}>{launchingDemo || demoIsActive ? 'Live run starting…' : 'Run demo again'}</button></div>
     </header>
     {error ? <div className="error-banner" role="alert">{error}</div> : null}
+    {dashboard?.demo_execution?.status === 'FAILED' && <div className="error-banner" role="alert">Live demo failed: {dashboard.demo_execution.error}</div>}
 
     <section className="panel hierarchy-panel story-tree-panel">
       <div className="panel-header"><div><h2>Agents in this run</h2><p className="tree-caption">{agents.length} registered · {roots.length} parent · {workerCount} child agents · select a node for its rules</p></div></div>

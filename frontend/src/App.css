@@ -20,6 +20,9 @@ button { border: 1px solid transparent; border-radius: 8px; padding: .67rem .95r
 
 /* Compact, centered tree diagram with circular agent nodes. */
 .run-id-label { color: #71859a; font: .62rem ui-monospace,monospace; }
+.header-actions { display: flex; align-items: center; gap: 13px; }
+.run-demo-button { padding: .62rem .9rem; border-radius: 999px; color: #06131c; background: #67e8f9; font-size: .71rem; white-space: nowrap; }
+.run-demo-button:disabled { opacity: .7; }
 .story-tree-panel { margin-top: 4px; }
 .story-tree-panel .panel-header { margin-bottom: 0; }
 .tree-caption { margin: 5px 0 0; color: #8294a9; font-size: .7rem; }
@@ -64,7 +67,7 @@ button { border: 1px solid transparent; border-radius: 8px; padding: .67rem .95r
 .run-story-panel { margin-top: 12px; }.run-story-panel .run-timeline { max-height: none; }
 .run-story-panel .run-timeline li { grid-template-columns: 12px 145px minmax(0,1fr); padding-bottom: 12px; }
 @media (max-width: 620px) {
-  .topbar { align-items: center; }.story-tree-panel .tree-children { gap: 8px; width: 100%; padding-top: 30px; }
+  .topbar { align-items: flex-start; }.header-actions { width: 100%; justify-content: space-between; }.story-tree-panel .tree-children { gap: 8px; width: 100%; padding-top: 30px; }
   .story-tree-panel .tree-children::before { left: 25%; right: 25%; }.story-tree-panel .tree-children::after { top: -22px; height: 22px; }
   .story-tree-panel .tree-children > .tree-branch::before { top: -30px; height: 30px; }
   .story-tree-panel .node-icon { width: 54px; height: 54px; }.story-tree-panel .node-role { font-size: .77rem; }
