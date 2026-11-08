@@ -125,6 +125,214 @@ class StagingService:
             origin=origin,
         )
 
+    def mark_ready_to_commit(self, run_id: str, branch_id: str, verified_completion: bool) -> dict[str, Any]:
+        """Accept supervisor-verified completion; workers cannot commit directly."""
+        self._require_run(run_id)
+        if verified_completion is not True:
+            raise PermissionError("Supervisor must verify branch completion")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self.database._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            branch = connection.execute(
+                "SELECT state, violation_count FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, branch_id),
+            ).fetchone()
+            if branch is None:
+                connection.rollback()
+                raise ValueError(f"Branch '{branch_id}' does not exist in run '{run_id}'")
+            if branch[0] == BranchState.READY_TO_COMMIT.value:
+                connection.commit()
+                return {"run_id": run_id, "branch_id": branch_id, "state": branch[0]}
+            if branch[0] != BranchState.RUNNING.value or branch[1] != 0:
+                connection.rollback()
+                raise ValueError("Branch is not eligible to commit")
+            connection.execute(
+                "UPDATE branches SET state = ?, completed_at = ? WHERE run_id = ? AND branch_id = ?",
+                (BranchState.READY_TO_COMMIT.value, timestamp, run_id, branch_id),
+            )
+            self._append_event(connection, run_id, branch_id, f"{branch_id}-agent",
+                               EventOrigin.SUPERVISOR.value, "COMMIT_ELIGIBLE", {}, timestamp)
+            connection.commit()
+        return {"run_id": run_id, "branch_id": branch_id, "state": BranchState.READY_TO_COMMIT.value}
+
+    def commit_branch(self, run_id: str, branch_id: str) -> dict[str, Any]:
+        """Apply every staged action for a branch in one SQLite transaction."""
+        self._require_run(run_id)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        connection = self.database._connect()
+        connection.row_factory = sqlite3.Row
+        commit_started = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            branch = connection.execute(
+                "SELECT state, violation_count FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, branch_id),
+            ).fetchone()
+            if branch is None:
+                raise ValueError(f"Branch '{branch_id}' does not exist in run '{run_id}'")
+            if branch[0] == BranchState.COMMITTED.value:
+                connection.commit()
+                return {"run_id": run_id, "branch_id": branch_id, "state": branch[0], "actions": []}
+            if branch[0] != BranchState.READY_TO_COMMIT.value or branch[1] != 0:
+                raise ValueError("Branch is not eligible to commit")
+
+            actions = connection.execute(
+                """SELECT action_id, tool, args_json, base_version, state
+                   FROM journal WHERE run_id = ? AND branch_id = ? ORDER BY sequence""",
+                (run_id, branch_id),
+            ).fetchall()
+            if any(action[4] != EffectState.STAGED.value for action in actions):
+                raise ValueError("Branch has an action that is no longer staged")
+
+            # Check every resource against the version observed when the first
+            # action for it was staged, before applying any mutation.
+            resources: dict[tuple[str, str], sqlite3.Row] = {}
+            for action in actions:
+                args = json.loads(action[2])
+                if action[1] == TOOL_STAGE_REFUND:
+                    key = (action[1], args["order_id"])
+                elif action[1] == TOOL_STAGE_PROMO_CREDIT:
+                    key = (action[1], args["customer_id"])
+                else:
+                    raise ValueError(f"Unsupported staged tool '{action[1]}'")
+                resource = resources.get(key)
+                if resource is None:
+                    resource = self._resource_row(connection, run_id, action[1], key[1])
+                    resources[key] = resource
+                if resource["version"] != action[3]:
+                    self._reject_conflict(connection, run_id, branch_id, actions, timestamp)
+                    connection.commit()
+                    return {"run_id": run_id, "branch_id": branch_id,
+                            "state": BranchState.COMMIT_REJECTED.value, "actions": []}
+
+            connection.execute(
+                "UPDATE branches SET state = ? WHERE run_id = ? AND branch_id = ?",
+                (BranchState.COMMITTING.value, run_id, branch_id),
+            )
+            commit_started = True
+            for action in actions:
+                args = json.loads(action[2])
+                if action[1] == TOOL_STAGE_REFUND:
+                    order = connection.execute(
+                        "SELECT paid_cents, refunded_cents FROM business_orders WHERE run_id = ? AND order_id = ?",
+                        (run_id, args["order_id"]),
+                    ).fetchone()
+                    if order is None or order[1] + args["amount_cents"] > order[0]:
+                        raise ValueError("Refund precondition failed at commit")
+                    connection.execute(
+                        """UPDATE business_orders SET refunded_cents = refunded_cents + ?,
+                           version = version + 1, status = CASE WHEN refunded_cents + ? >= paid_cents
+                           THEN 'REFUNDED' ELSE status END WHERE run_id = ? AND order_id = ?""",
+                        (args["amount_cents"], args["amount_cents"], run_id, args["order_id"]),
+                    )
+                elif action[1] == TOOL_STAGE_PROMO_CREDIT:
+                    connection.execute(
+                        """UPDATE business_accounts SET promo_credit_cents = promo_credit_cents + ?,
+                           version = version + 1 WHERE run_id = ? AND customer_id = ?""",
+                        (args["amount_cents"], run_id, args["customer_id"]),
+                    )
+                connection.execute(
+                    "UPDATE journal SET state = ? WHERE action_id = ?",
+                    (EffectState.COMMITTED.value, action[0]),
+                )
+            connection.execute(
+                "UPDATE branches SET state = ?, committed_at = ? WHERE run_id = ? AND branch_id = ?",
+                (BranchState.COMMITTED.value, timestamp, run_id, branch_id),
+            )
+            self._append_event(connection, run_id, branch_id, f"{branch_id}-agent",
+                               EventOrigin.SUPERVISOR.value, "BRANCH_COMMITTED",
+                               {"action_ids": [action[0] for action in actions]}, timestamp)
+            connection.commit()
+            return {"run_id": run_id, "branch_id": branch_id,
+                    "state": BranchState.COMMITTED.value,
+                    "actions": [action[0] for action in actions]}
+        except Exception as exc:
+            connection.rollback()
+            if commit_started:
+                # The business transaction rolled back. Persist an explicit
+                # terminal outcome so the dashboard cannot leave this branch
+                # looking eligible for a commit that already failed.
+                with self.database._connect() as failure_connection:
+                    failure_connection.execute("BEGIN IMMEDIATE")
+                    failure_connection.execute(
+                        """UPDATE journal SET state = ? WHERE run_id = ? AND branch_id = ?
+                           AND state = ?""",
+                        (EffectState.ABORTED.value, run_id, branch_id, EffectState.STAGED.value),
+                    )
+                    failure_connection.execute(
+                        "UPDATE branches SET state = ?, aborted_at = ? WHERE run_id = ? AND branch_id = ?",
+                        (BranchState.COMMIT_FAILED.value, timestamp, run_id, branch_id),
+                    )
+                    self._append_event(
+                        failure_connection, run_id, branch_id, f"{branch_id}-agent",
+                        EventOrigin.SUPERVISOR.value, "COMMIT_FAILED",
+                        {"error": str(exc)}, timestamp,
+                    )
+            raise
+        finally:
+            connection.close()
+
+    def abort_branch(self, run_id: str, branch_id: str, reason: str = "CONTAINED") -> dict[str, Any]:
+        """Atomically prevent future commit and mark all pending effects aborted."""
+        self._require_run(run_id)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self.database._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            branch = connection.execute(
+                "SELECT state FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, branch_id),
+            ).fetchone()
+            if branch is None:
+                connection.rollback()
+                raise ValueError(f"Branch '{branch_id}' does not exist in run '{run_id}'")
+            if branch[0] == BranchState.COMMITTED.value:
+                connection.commit()
+                return {"run_id": run_id, "branch_id": branch_id,
+                        "state": BranchState.COMMITTED.value, "aborted_actions": []}
+            if branch[0] == BranchState.ABORTED.value:
+                connection.commit()
+                return {"run_id": run_id, "branch_id": branch_id,
+                        "state": BranchState.ABORTED.value, "aborted_actions": []}
+
+            connection.execute(
+                "UPDATE branches SET state = ? WHERE run_id = ? AND branch_id = ?",
+                (BranchState.ABORTING.value, run_id, branch_id),
+            )
+            action_rows = connection.execute(
+                """SELECT action_id FROM journal WHERE run_id = ? AND branch_id = ? AND state = ?""",
+                (run_id, branch_id, EffectState.STAGED.value),
+            ).fetchall()
+            action_ids = [row[0] for row in action_rows]
+            connection.execute(
+                """UPDATE journal SET state = ? WHERE run_id = ? AND branch_id = ? AND state = ?""",
+                (EffectState.ABORTED.value, run_id, branch_id, EffectState.STAGED.value),
+            )
+            connection.execute(
+                "UPDATE branches SET state = ?, aborted_at = ? WHERE run_id = ? AND branch_id = ?",
+                (BranchState.ABORTED.value, timestamp, run_id, branch_id),
+            )
+            self._append_event(connection, run_id, branch_id, f"{branch_id}-agent",
+                               EventOrigin.SUPERVISOR.value, "BRANCH_ABORTED",
+                               {"reason": reason, "action_ids": action_ids}, timestamp)
+            connection.commit()
+        return {"run_id": run_id, "branch_id": branch_id,
+                "state": BranchState.ABORTED.value, "aborted_actions": action_ids}
+
+    def _reject_conflict(self, connection, run_id, branch_id, actions, timestamp):
+        action_ids = [action[0] for action in actions]
+        connection.execute(
+            """UPDATE journal SET state = ? WHERE run_id = ? AND branch_id = ? AND state = ?""",
+            (EffectState.ABORTED.value, run_id, branch_id, EffectState.STAGED.value),
+        )
+        connection.execute(
+            """UPDATE branches SET state = ?, aborted_at = ?
+               WHERE run_id = ? AND branch_id = ?""",
+            (BranchState.COMMIT_REJECTED.value, timestamp, run_id, branch_id),
+        )
+        self._append_event(connection, run_id, branch_id, f"{branch_id}-agent",
+                           EventOrigin.SUPERVISOR.value, "COMMIT_REJECTED",
+                           {"reason": "RESOURCE_VERSION_CONFLICT", "action_ids": action_ids}, timestamp)
+
     def _stage(
         self,
         run_id: str,
