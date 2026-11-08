@@ -50,7 +50,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(`Request failed for ${path}: ${response.status}`)
   return (await response.json()) as T
 }
-const DEMO_RUN_FALLBACKS = ['agenttree-transactional-demo', 'run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
+const DEMO_RUN_FALLBACKS = ['agenttree-live-demo', 'agenttree-transactional-demo', 'run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 const shortTime = (value?: string) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
 

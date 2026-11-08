@@ -115,10 +115,18 @@ def reset_command(args):
 
 
 def demo_command(args):
-    from demo.run_demo import run_demo_sequence
-
     try:
-        print_json(run_demo_sequence(_base(args.base_url), args.run_id))
+        if args.controlled:
+            from demo.run_demo import run_demo_sequence
+
+            run_id = args.run_id or "agenttree-transactional-demo"
+            result = run_demo_sequence(_base(args.base_url), run_id)
+        else:
+            from demo.run_live_demo import run_live_demo
+
+            run_id = args.run_id or "agenttree-live-demo"
+            result = run_live_demo(_base(args.base_url), run_id)
+        print_json(result)
     except Exception as exc:
         raise RuntimeError(f"Demo failed: {exc}") from exc
 
@@ -158,9 +166,10 @@ def build_parser():
     reset.add_argument("--base-url", default=DEFAULT_BASE_URL)
     reset.set_defaults(handler=reset_command)
 
-    demo = subparsers.add_parser("demo", help="Run the deterministic staged/abort/commit presentation")
-    demo.add_argument("--run-id", default="agenttree-transactional-demo")
+    demo = subparsers.add_parser("demo", help="Run the live Bedrock-driven staged/abort/commit demo")
+    demo.add_argument("--run-id", help="Run ID (defaults to agenttree-live-demo or the controlled demo ID)")
     demo.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    demo.add_argument("--controlled", action="store_true", help="Use the deterministic no-AWS presentation instead")
     demo.set_defaults(handler=demo_command)
     return parser
 

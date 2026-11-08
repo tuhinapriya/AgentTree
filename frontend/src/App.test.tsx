@@ -84,7 +84,7 @@ test('loads the transactional demo run by default', async () => {
   render(<App />)
 
   expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/agenttree-transactional-demo/dashboard'),
+    expect.stringContaining('/runs/agenttree-live-demo/dashboard'),
     expect.any(Object),
   )
 })
@@ -106,7 +106,7 @@ test('stop branch trigger calls the branch stop endpoint', async () => {
   await user.click(screen.getByRole('button', { name: /^Contain branch$/i }))
 
   expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/agenttree-transactional-demo/branches/parent-agent/stop'),
+    expect.stringContaining('/runs/agenttree-live-demo/branches/parent-agent/stop'),
     expect.objectContaining({ method: 'POST' }),
   )
 })
