@@ -1,7 +1,7 @@
 import json
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -186,19 +186,20 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/events")
-    def get_run_events(run_id: str) -> dict[str, Any]:
+    def get_run_events(run_id: str, after_seq: int = Query(default=0, ge=0)) -> dict[str, Any]:
         try:
-            return {"run_id": run_id, "events": gateway.get_events(run_id)}
+            return {"run_id": run_id, "events": gateway.get_events(run_id, after_seq)}
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/events/stream")
-    def stream_run_events(run_id: str):
+    def stream_run_events(run_id: str, after_seq: int = Query(default=0, ge=0)):
         def event_generator():
             yield "event: connected\n"
-            yield f"data: {json.dumps({'run_id': run_id, 'type': 'connected'})}\n\n"
-            for event in gateway.get_events(run_id):
+            yield f"data: {json.dumps({'run_id': run_id, 'type': 'connected', 'after_seq': after_seq})}\n\n"
+            for event in gateway.get_events(run_id, after_seq):
                 yield "event: message\n"
+                yield f"id: {event['event_seq']}\n"
                 yield f"data: {json.dumps(event)}\n\n"
             yield "event: heartbeat\n"
             yield f"data: {json.dumps({'run_id': run_id, 'type': 'heartbeat'})}\n\n"
@@ -212,6 +213,8 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
                 "run_id": run_id,
                 "hierarchy": service.get_hierarchy(run_id),
                 "events": gateway.get_events(run_id),
+                "effects": staging.get_effects(run_id),
+                "business_state": staging.get_business_state(run_id),
             }
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -227,6 +230,16 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
     def get_demo_state(run_id: str) -> dict[str, Any]:
         try:
             return gateway.get_demo_state(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/effects")
+    def get_effects(run_id: str) -> dict[str, Any]:
+        try:
+            return {
+                **staging.get_effects(run_id),
+                "business_state": staging.get_business_state(run_id),
+            }
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

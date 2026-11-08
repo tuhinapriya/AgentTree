@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from datetime import datetime, timezone
 from typing import Any
@@ -18,7 +19,6 @@ class GatewayService:
         self.database = database
         self.supervisor = supervisor
         self.staging = StagingService(database)
-        self.events: dict[str, list[dict[str, Any]]] = {}
         self.business_db = self._initial_business_state()
 
     def _initial_business_state(self) -> dict[str, dict[str, Any]]:
@@ -163,17 +163,39 @@ class GatewayService:
             except ValueError:
                 pass
 
-    def get_events(self, run_id: str) -> list[dict[str, Any]]:
+    def get_events(self, run_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
         if not self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' does not exist")
-        return self.events.get(run_id, [])
+        with self.database._connect() as connection:
+            rows = connection.execute(
+                """SELECT event_seq, branch_id, agent_id, origin, type, payload_json, created_at
+                   FROM audit_events WHERE run_id = ? AND event_seq > ? ORDER BY event_seq""",
+                (run_id, after_seq),
+            ).fetchall()
+        events = []
+        for row in rows:
+            payload = json.loads(row[5])
+            events.append({
+                "event_seq": row[0],
+                "run_id": run_id,
+                "branch_id": row[1],
+                "agent_id": row[2],
+                "origin": row[3],
+                "type": row[4],
+                "timestamp": row[6],
+                "tool": payload.get("tool"),
+                "decision": payload.get("decision"),
+                "reason_code": payload.get("reason_code"),
+                "detail": payload.get("detail") or payload.get("reason_code"),
+                "payload": payload,
+            })
+        return events
 
     def reset_demo(self, run_id: str) -> dict[str, Any]:
         if not self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' does not exist")
         self.database.reset_demo_fixtures(run_id)
         self.business_db = self._initial_business_state()
-        self.events[run_id] = []
         with self.database._connect() as connection:
             connection.execute("DELETE FROM agent_sessions WHERE run_id = ?", (run_id,))
         return self.get_demo_state(run_id)
@@ -188,6 +210,7 @@ class GatewayService:
             "customer": account,
             "account": account,
             "order": order,
+            "transactional": self.staging.get_business_state(run_id),
         }
 
     def record_event(
@@ -199,16 +222,26 @@ class GatewayService:
         reason_code: str | None,
         origin: str,
     ) -> dict[str, Any]:
-        event = {
+        timestamp = datetime.now(timezone.utc).isoformat()
+        payload = {"tool": tool, "decision": decision, "reason_code": reason_code}
+        with self.database._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO audit_events
+                   (run_id, branch_id, agent_id, origin, type, payload_json, created_at)
+                   VALUES (?, ?, ?, ?, 'TOOL_DECISION', ?, ?)""",
+                (run_id, None, agent_id, origin, json.dumps(payload, sort_keys=True), timestamp),
+            )
+            event_seq = cursor.lastrowid
+        return {
+            "event_seq": event_seq,
             "run_id": run_id,
             "agent_id": agent_id,
             "tool": tool,
             "decision": decision,
             "reason_code": reason_code,
             "origin": origin,
+            "timestamp": timestamp,
         }
-        self.events.setdefault(run_id, []).append(event)
-        return event
 
     def _branch_members(self, run_id: str, branch_id: str) -> list[str]:
         root = self.database.get_agent(run_id, branch_id)

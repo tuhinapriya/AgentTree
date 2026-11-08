@@ -129,4 +129,21 @@ def test_transactional_demo_vertical_slice_over_api(tmp_path):
             "SELECT state FROM journal WHERE run_id = ? AND branch_id = 'account-agent'",
             (run_id,),
         ).fetchone()[0] == "ABORTED"
+    effects = client.get(f"/runs/{run_id}/effects").json()
+    assert {branch["branch_id"]: branch["state"] for branch in effects["branches"]}["order-agent"] == "COMMITTED"
+    assert {branch["branch_id"]: branch["state"] for branch in effects["branches"]}["account-agent"] == "ABORTED"
+    assert effects["business_state"]["order"]["refunded_cents"] == 4500
+    assert effects["business_state"]["account"]["promo_credit_cents"] == 0
+
+    events = client.get(f"/runs/{run_id}/events").json()["events"]
+    sequences = [event["event_seq"] for event in events]
+    assert sequences == sorted(sequences)
+    after_seq = client.get(f"/runs/{run_id}/events?after_seq={sequences[0]}").json()["events"]
+    assert all(event["event_seq"] > sequences[0] for event in after_seq)
+
+    # A fresh app instance reconstructs the same state from persisted SQLite.
+    refreshed = TestClient(build_app(database_path))
+    refreshed_state = refreshed.get(f"/runs/{run_id}/effects").json()
+    assert refreshed_state["business_state"] == effects["business_state"]
+    assert len(refreshed.get(f"/runs/{run_id}/events").json()["events"]) == len(events)
     client.post(f"/runs/{run_id}/cleanup")

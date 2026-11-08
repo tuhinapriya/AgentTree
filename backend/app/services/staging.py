@@ -87,6 +87,65 @@ class StagingService:
             "is_provisional": pending > 0,
         }
 
+    def get_business_state(self, run_id: str) -> dict[str, Any]:
+        self._require_run(run_id)
+        with self.database._connect() as connection:
+            account = connection.execute(
+                "SELECT * FROM business_accounts WHERE run_id = ? AND customer_id = ?",
+                (run_id, CUSTOMER_ID),
+            ).fetchone()
+            order = connection.execute(
+                "SELECT * FROM business_orders WHERE run_id = ? AND order_id = ?",
+                (run_id, ORDER_ID),
+            ).fetchone()
+        if account is None or order is None:
+            raise ValueError("Transactional demo fixtures are missing")
+        return {
+            "account": {
+                "customer_id": account[1],
+                "promo_credit_cents": account[2],
+                "version": account[3],
+                "notes": account[4],
+            },
+            "order": {
+                "order_id": order[1],
+                "customer_id": order[2],
+                "paid_cents": order[3],
+                "refunded_cents": order[4],
+                "version": order[5],
+                "status": order[6],
+            },
+        }
+
+    def get_effects(self, run_id: str) -> dict[str, Any]:
+        self._require_run(run_id)
+        with self.database._connect() as connection:
+            branches = connection.execute(
+                """SELECT branch_id, state, violation_count, completed_at, committed_at, aborted_at
+                   FROM branches WHERE run_id = ? ORDER BY branch_id""",
+                (run_id,),
+            ).fetchall()
+            rows = connection.execute(
+                """SELECT action_id, branch_id, sequence, tool, args_json, base_version,
+                          state, idempotency_key, created_at
+                   FROM journal WHERE run_id = ? ORDER BY created_at, branch_id, sequence""",
+                (run_id,),
+            ).fetchall()
+        return {
+            "run_id": run_id,
+            "branches": [
+                {"branch_id": row[0], "state": row[1], "violation_count": row[2],
+                 "completed_at": row[3], "committed_at": row[4], "aborted_at": row[5]}
+                for row in branches
+            ],
+            "effects": [
+                {"action_id": row[0], "branch_id": row[1], "sequence": row[2],
+                 "tool": row[3], "arguments": json.loads(row[4]), "base_version": row[5],
+                 "state": row[6], "idempotency_key": row[7], "created_at": row[8]}
+                for row in rows
+            ],
+        }
+
     def stage_refund(
         self,
         run_id: str,
