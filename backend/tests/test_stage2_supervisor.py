@@ -43,6 +43,8 @@ def test_supervisor_launches_run_and_children(tmp_path):
     assert {item["agent_id"] for item in payload["started"]} == {"parent-agent", "order-agent", "account-agent"}
     assert all(item["pid"] is not None for item in payload["started"])
     assert all(item["status"] == "RUNNING" for item in payload["started"])
+    assert all(item["worker_ready"]["type"] == "WORKER_READY" for item in payload["started"])
+    assert {item["role"] for item in payload["started"]} == {"parent", "order", "account"}
 
     for item in payload["started"]:
         os.kill(item["pid"], 0)
@@ -63,6 +65,9 @@ def test_child_termination_does_not_stop_sibling(tmp_path):
     assert stop_response.status_code == 200
     stopped_payload = stop_response.json()
     assert stopped_payload["status"] == "STOPPED"
+    stopped_agent = client.get("/runs/run-stage2-stop/agents/account-agent").json()
+    assert stopped_agent["exit_code"] == 0
+    assert stopped_agent["process_create_time"] is not None
 
     order_status_response = client.get("/runs/run-stage2-stop/agents/order-agent")
     assert order_status_response.status_code == 200

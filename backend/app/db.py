@@ -41,11 +41,15 @@ class AgentTreeDB:
                     allowed_tools TEXT NOT NULL DEFAULT '',
                     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     stopped_at TEXT,
+                    exit_code INTEGER,
                     PRIMARY KEY (run_id, agent_id),
                     FOREIGN KEY (run_id) REFERENCES runs(run_id)
                 )
                 """
             )
+            agent_columns = {row[1] for row in connection.execute("PRAGMA table_info(agents)")}
+            if "exit_code" not in agent_columns:
+                connection.execute("ALTER TABLE agents ADD COLUMN exit_code INTEGER")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -268,7 +272,10 @@ class AgentTreeDB:
         task_state: Optional[str] = None,
         pid: Optional[int] = None,
         process_create_time: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        reset_exit_code: bool = False,
         stopped_at: Optional[str] = None,
+        clear_stopped_at: bool = False,
     ) -> dict:
         values: list[str] = []
         params: list[object] = []
@@ -285,7 +292,14 @@ class AgentTreeDB:
         if process_create_time is not None:
             values.append("process_create_time = ?")
             params.append(process_create_time)
-        if stopped_at is not None:
+        if reset_exit_code:
+            values.append("exit_code = NULL")
+        elif exit_code is not None:
+            values.append("exit_code = ?")
+            params.append(exit_code)
+        if clear_stopped_at:
+            values.append("stopped_at = NULL")
+        elif stopped_at is not None:
             values.append("stopped_at = ?")
             params.append(stopped_at)
 
@@ -330,4 +344,5 @@ class AgentTreeDB:
             "allowed_tools": [item for item in (row[9].split(",") if row[9] else []) if item],
             "started_at": row[10],
             "stopped_at": row[11],
+            "exit_code": row[12] if len(row) > 12 else None,
         }

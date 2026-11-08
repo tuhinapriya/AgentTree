@@ -1,8 +1,10 @@
+import json
 import os
 import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import psutil
@@ -30,9 +32,11 @@ class SupervisorService:
             if agent is None:
                 raise ValueError(f"Agent '{agent_id}' does not exist in run '{run_id}'")
 
-            process = self._spawn_agent_process()
+            process, worker_ready = self._spawn_agent_process(run_id, agent)
             self.processes.setdefault(run_id, {})[agent_id] = process
-            timestamp = datetime.now(timezone.utc).isoformat()
+            timestamp = datetime.fromtimestamp(
+                psutil.Process(process.pid).create_time(), timezone.utc
+            ).isoformat()
             self.database.update_agent_state(
                 run_id=run_id,
                 agent_id=agent_id,
@@ -40,13 +44,16 @@ class SupervisorService:
                 task_state="WAITING_FOR_INSTRUCTION",
                 pid=process.pid,
                 process_create_time=timestamp,
-                stopped_at=None,
+                reset_exit_code=True,
+                clear_stopped_at=True,
             )
             started.append({
                 "agent_id": agent_id,
+                "role": agent["role"],
                 "pid": process.pid,
                 "status": "RUNNING",
                 "process_create_time": timestamp,
+                "worker_ready": worker_ready,
             })
 
         return {"run_id": run_id, "started": started}
@@ -91,10 +98,13 @@ class SupervisorService:
             self.database.update_agent_state(run_id, agent_id, status="FAILED")
             raise ValueError(f"Unable to terminate agent '{agent_id}'")
 
+        exit_code = process.returncode if process is not None else None
+
         self.database.update_agent_state(
             run_id=run_id,
             agent_id=agent_id,
             status="STOPPED",
+            exit_code=exit_code,
             stopped_at=datetime.now(timezone.utc).isoformat(),
         )
         self.processes.get(run_id, {}).pop(agent_id, None)
@@ -125,6 +135,7 @@ class SupervisorService:
                     agent_id=agent_id,
                     status=status,
                     stopped_at=datetime.now(timezone.utc).isoformat() if status == "FAILED" else None,
+                    clear_stopped_at=status == "RUNNING",
                 )
 
             updated_agents.append(self.database.get_agent(run_id, agent_id))
@@ -147,15 +158,40 @@ class SupervisorService:
         self.processes.pop(run_id, None)
         return {"run_id": run_id, "status": "CLEANED"}
 
-    def _spawn_agent_process(self) -> subprocess.Popen:
+    def _spawn_agent_process(self, run_id: str, agent: dict[str, Any]) -> tuple[subprocess.Popen, dict[str, Any]]:
+        worker_path = Path(__file__).resolve().parents[3] / "agents" / "worker.py"
         command = [
             sys.executable,
-            "-c",
-            (
-                "import signal, sys, time; "
-                "signal.signal(signal.SIGTERM, lambda *args: sys.exit(0)); "
-                "print('agent-ready', flush=True); "
-                "time.sleep(90)"
-            ),
+            str(worker_path),
+            "--run-id", run_id,
+            "--agent-id", agent["agent_id"],
+            "--role", agent["role"],
         ]
-        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            ready_line = process.stdout.readline() if process.stdout is not None else ""
+            ready = json.loads(ready_line)
+            if (
+                ready.get("type") != "WORKER_READY"
+                or ready.get("run_id") != run_id
+                or ready.get("agent_id") != agent["agent_id"]
+                or ready.get("role") != agent["role"]
+                or ready.get("pid") != process.pid
+            ):
+                raise RuntimeError("Worker startup identity did not match the supervisor assignment")
+        except Exception:
+            process.terminate()
+            process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            raise
+        if process.stdout is not None:
+            process.stdout.close()
+        return process, ready
