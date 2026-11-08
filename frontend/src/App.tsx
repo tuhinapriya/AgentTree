@@ -59,6 +59,7 @@ function App() {
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState('parent-agent')
   const [isLoading, setIsLoading] = useState(false)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const runIdRef = useRef(runId)
   useEffect(() => { runIdRef.current = runId }, [runId])
@@ -100,16 +101,47 @@ function App() {
   const pending = effects.filter((effect) => effect.state === 'STAGED').length
 
   const handleStopBranch = async (agentId: string) => {
+    setPendingAction(`stop:${agentId}`)
     try {
       await fetchJson(`/runs/${runIdRef.current}/branches/${agentId}/stop`, { method: 'POST' })
       await loadDashboard(runIdRef.current)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to stop branch.') }
+    finally { setPendingAction(null) }
   }
   const handleResetDemo = async () => {
+    setPendingAction('reset')
     try {
       await fetchJson(`/runs/${runIdRef.current}/demo/reset`, { method: 'POST' })
       await loadDashboard(runIdRef.current)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to reset demo.') }
+    finally { setPendingAction(null) }
+  }
+  const handleStartRun = async () => {
+    const id = runIdRef.current.trim()
+    if (!id) { setError('Run ID is required.'); return }
+    setPendingAction('start')
+    try {
+      await fetchJson(`/runs`, { method: 'POST', body: JSON.stringify({ run_id: id, scenario: 'customer-operations' }) })
+      const agents = [
+        { agent_id: 'parent-agent', role: 'parent', parent_agent_id: null, allowed_tools: [] },
+        { agent_id: 'order-agent', role: 'order', parent_agent_id: 'parent-agent', allowed_tools: ['read_order', 'stage_refund', 'read_orders', 'process_order'] },
+        { agent_id: 'account-agent', role: 'account', parent_agent_id: 'parent-agent', allowed_tools: ['read_account', 'stage_promo_credit'] },
+      ]
+      for (const agent of agents) await fetchJson(`/runs/${id}/agents`, { method: 'POST', body: JSON.stringify(agent) })
+      await fetchJson(`/runs/${id}/supervise`, { method: 'POST', body: JSON.stringify({ agent_ids: agents.map((agent) => agent.agent_id) }) })
+      await loadDashboard(id)
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to start run.') }
+    finally { setPendingAction(null) }
+  }
+  const handleReleaseBranch = async (branchId: string) => {
+    setPendingAction(`release:${branchId}`)
+    try {
+      await fetchJson(`/runs/${runIdRef.current}/branches/${branchId}/complete`, { method: 'POST' })
+      const result = await fetchJson<{ state: string }>(`/runs/${runIdRef.current}/branches/${branchId}/commit`, { method: 'POST' })
+      await loadDashboard(runIdRef.current)
+      setError(result.state === 'COMMITTED' ? null : `Branch release finished with state ${result.state}.`)
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to release branch.') }
+    finally { setPendingAction(null) }
   }
 
   return <div className="app-shell">
@@ -118,6 +150,7 @@ function App() {
       <div className="toolbar">
         <label className="run-input"><span>ACTIVE RUN</span><input aria-label="Run ID" value={runId} onChange={(e) => setRunId(e.target.value)} /></label>
         <button type="button" onClick={() => void loadDashboard(runId)} disabled={isLoading}>{isLoading ? 'Refreshing…' : 'Refresh'}</button>
+        {agents.length === 0 && <button type="button" onClick={() => void handleStartRun()} disabled={pendingAction !== null}>{pendingAction === 'start' ? 'Starting…' : 'Start run'}</button>}
         <button type="button" className="secondary" onClick={() => void handleResetDemo()}>Reset demo</button>
       </div>
     </header>
@@ -151,7 +184,8 @@ function App() {
           <div className="identity-card"><span className="identity-icon">{selectedAgent.role.slice(0, 1).toUpperCase()}</span><div><strong>{selectedAgent.agent_id}</strong><span>{selectedAgent.parent_agent_id ? `Reports to ${selectedAgent.parent_agent_id}` : 'Root coordinator'}</span></div></div>
           <div className="detail-grid"><div className="detail-block"><p className="label">PROCESS</p><strong>{selectedAgent.pid ? `PID ${selectedAgent.pid}` : '—'}</strong></div><div className="detail-block"><p className="label">EXIT CODE</p><strong>{selectedAgent.exit_code ?? '—'}</strong></div><div className="detail-block"><p className="label">TASK STATE</p><strong>{(selectedAgent.task_state ?? '—').replaceAll('_', ' ')}</strong></div><div className="detail-block"><p className="label">STATUS</p><strong>{selectedAgent.status}</strong></div></div>
           <div className="detail-block"><p className="label">AUTHORIZED TOOLS</p><div className="tool-tags">{(selectedAgent.allowed_tools ?? []).map((tool) => <span key={tool}>{tool}</span>)}</div></div>
-          <div className="action-stack"><button type="button" onClick={() => void handleStopBranch(selectedAgent.agent_id)}>Contain branch</button><button type="button" className="secondary" onClick={() => void handleResetDemo()}>Reset run</button></div>
+          <div className="action-stack"><button type="button" onClick={() => void handleStopBranch(selectedAgent.agent_id)} disabled={pendingAction !== null || ['STOPPED', 'FAILED'].includes(selectedAgent.status)}>{pendingAction === `stop:${selectedAgent.agent_id}` ? 'Containing…' : 'Contain branch'}</button><button type="button" className="secondary" onClick={() => void handleResetDemo()} disabled={pendingAction !== null}>{pendingAction === 'reset' ? 'Resetting…' : 'Reset run'}</button></div>
+          {effects.some((effect) => effect.branch_id === selectedAgent.agent_id && effect.state === 'STAGED') && <button type="button" className="release-button" onClick={() => void handleReleaseBranch(selectedAgent.agent_id)} disabled={pendingAction !== null || selectedAgent.status !== 'RUNNING'}>{pendingAction === `release:${selectedAgent.agent_id}` ? 'Committing…' : 'Mark complete & commit staged work'}</button>}
         </> : <p className="empty-state">Select an agent to inspect its runtime state.</p>}
       </aside>
     </main>
