@@ -269,6 +269,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
         try:
             return {
                 "run_id": run_id,
+                "run": database.get_run(run_id),
                 "hierarchy": service.get_hierarchy(run_id),
                 "events": gateway.get_events(run_id),
                 "effects": staging.get_effects(run_id),

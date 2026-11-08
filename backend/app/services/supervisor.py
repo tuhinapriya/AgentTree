@@ -81,6 +81,7 @@ class SupervisorService:
                 "worker_ready": worker_ready,
             })
 
+        self.database.set_run_status(run_id, "RUNNING")
         return {"run_id": run_id, "started": started}
 
     def stop_agent(self, run_id: str, agent_id: str) -> dict[str, Any]:
@@ -133,7 +134,19 @@ class SupervisorService:
             stopped_at=datetime.now(timezone.utc).isoformat(),
         )
         self.processes.get(run_id, {}).pop(agent_id, None)
+        self._sync_run_status(run_id)
         return {"run_id": run_id, "agent_id": agent_id, "status": "STOPPED", "pid": pid}
+
+    def _sync_run_status(self, run_id: str) -> None:
+        agents = self.database.get_agents_for_run(run_id)
+        statuses = {agent["status"] for agent in agents}
+        if statuses.intersection({"RUNNING", "STOPPING"}):
+            status = "RUNNING"
+        elif statuses and statuses.issubset({"STOPPED", "FAILED"}):
+            status = "FAILED" if statuses == {"FAILED"} else "STOPPED"
+        else:
+            status = "CREATED"
+        self.database.set_run_status(run_id, status)
 
     def request_stop_agent(self, run_id: str, agent_id: str) -> dict[str, Any]:
         """Begin verified stop asynchronously for a worker making its own denied call."""
@@ -165,6 +178,10 @@ class SupervisorService:
         updated = self.database.update_agent_state(
             run_id, agent_id, task_state="COMPLETED"
         )
+        if self.gateway is not None:
+            self.gateway.record_event(
+                run_id, agent_id, "worker.complete", "ALLOW", None, "MODEL"
+            )
         return {"run_id": run_id, "agent_id": agent_id, "task_state": updated["task_state"]}
 
     def monitor_run(self, run_id: str) -> dict[str, Any]:
@@ -197,6 +214,7 @@ class SupervisorService:
 
             updated_agents.append(self.database.get_agent(run_id, agent_id))
 
+        self._sync_run_status(run_id)
         return {"run_id": run_id, "agents": updated_agents}
 
     def cleanup_run(self, run_id: str) -> dict[str, Any]:
@@ -213,6 +231,7 @@ class SupervisorService:
                 pass
 
         self.processes.pop(run_id, None)
+        self._sync_run_status(run_id)
         return {"run_id": run_id, "status": "CLEANED"}
 
     def _spawn_agent_process(

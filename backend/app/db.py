@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -232,11 +233,41 @@ class AgentTreeDB:
         self.create_demo_fixtures(run_id)
 
     def create_run(self, run_id: str, scenario: str) -> None:
+        created_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO runs (run_id, scenario, status) VALUES (?, ?, 'CREATED')",
-                (run_id, scenario),
+                "INSERT INTO runs (run_id, scenario, status, created_at) VALUES (?, ?, 'CREATED', ?)",
+                (run_id, scenario, created_at),
             )
+            connection.execute(
+                """INSERT INTO audit_events (run_id, branch_id, agent_id, origin, type, payload_json, created_at)
+                   VALUES (?, NULL, NULL, 'OPERATOR', 'RUN_CREATED', ?, ?)""",
+                (run_id, json.dumps({"scenario": scenario}), created_at),
+            )
+
+    def get_run(self, run_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT run_id, scenario, status, created_at FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            statuses = {
+                item[0] for item in connection.execute(
+                    "SELECT status FROM agents WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
+        if row is None:
+            return None
+        status = row[2]
+        if statuses.intersection({"RUNNING", "STOPPING"}):
+            status = "RUNNING"
+        elif statuses and statuses.issubset({"STOPPED", "FAILED"}):
+            status = "FAILED" if statuses == {"FAILED"} else "STOPPED"
+        return {"run_id": row[0], "scenario": row[1], "status": status, "created_at": row[3]}
+
+    def set_run_status(self, run_id: str, status: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE runs SET status = ? WHERE run_id = ?", (status, run_id))
 
     def run_exists(self, run_id: str) -> bool:
         with self._connect() as connection:
