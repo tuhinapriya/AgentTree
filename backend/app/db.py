@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from backend.app.services.demo_policy import CUSTOMER_ID, ORDER_ID
+
 
 class AgentTreeDB:
     def __init__(self, database_path: Optional[str] = None):
@@ -44,6 +46,126 @@ class AgentTreeDB:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS branches (
+                    run_id TEXT NOT NULL,
+                    branch_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'RUNNING',
+                    violation_count INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    committed_at TEXT,
+                    aborted_at TEXT,
+                    PRIMARY KEY (run_id, branch_id),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_accounts (
+                    run_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    promo_credit_cents INTEGER NOT NULL DEFAULT 0,
+                    version INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (run_id, customer_id),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_orders (
+                    run_id TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    paid_cents INTEGER NOT NULL,
+                    refunded_cents INTEGER NOT NULL DEFAULT 0,
+                    version INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'PAID',
+                    PRIMARY KEY (run_id, order_id),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS journal (
+                    action_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    branch_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    tool TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    base_version INTEGER NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'STAGED',
+                    idempotency_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (run_id, branch_id, sequence),
+                    UNIQUE (run_id, idempotency_key),
+                    FOREIGN KEY (run_id, branch_id) REFERENCES branches(run_id, branch_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    branch_id TEXT,
+                    agent_id TEXT,
+                    origin TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+                """
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+
+    def create_demo_fixtures(self, run_id: str) -> None:
+        """Create stable business fixtures for a run without overwriting state."""
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO business_accounts
+                   (run_id, customer_id, promo_credit_cents, version, notes)
+                   VALUES (?, ?, 0, 0, ?)""",
+                (run_id, CUSTOMER_ID, "Loyalty promotion review"),
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO business_orders
+                   (run_id, order_id, customer_id, paid_cents, refunded_cents, version, status)
+                   VALUES (?, ?, ?, 4500, 0, 0, 'PAID')""",
+                (run_id, ORDER_ID, CUSTOMER_ID),
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO branches (run_id, branch_id, state)
+                   VALUES (?, 'order-agent', 'RUNNING'), (?, 'account-agent', 'RUNNING')""",
+                (run_id, run_id),
+            )
+
+    def reset_demo_fixtures(self, run_id: str) -> None:
+        """Reset only transactional demo data for a run."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM audit_events WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM journal WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM branches WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM business_orders WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM business_accounts WHERE run_id = ?", (run_id,))
+        self.create_demo_fixtures(run_id)
 
     def create_run(self, run_id: str, scenario: str) -> None:
         with self._connect() as connection:

@@ -11,6 +11,7 @@ class HierarchyService:
         if self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' already exists")
         self.database.create_run(run_id, scenario)
+        self.database.create_demo_fixtures(run_id)
         return {"run_id": run_id, "scenario": scenario, "status": "CREATED"}
 
     def create_agent(

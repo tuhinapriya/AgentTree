@@ -109,6 +109,7 @@ class GatewayService:
     def reset_demo(self, run_id: str) -> dict[str, Any]:
         if not self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' does not exist")
+        self.database.reset_demo_fixtures(run_id)
         self.business_db = self._initial_business_state()
         self.events[run_id] = []
         self.credentials.pop(run_id, None)
