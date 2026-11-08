@@ -263,7 +263,11 @@ class AgentTreeDB:
             status = "RUNNING"
         elif statuses and statuses.issubset({"STOPPED", "FAILED"}):
             status = "FAILED" if statuses == {"FAILED"} else "STOPPED"
-        return {"run_id": row[0], "scenario": row[1], "status": status, "created_at": row[3]}
+        created_at = row[3]
+        # SQLite CURRENT_TIMESTAMP values from older runs are UTC but naive.
+        if created_at and not created_at.endswith("Z") and "+" not in created_at[10:]:
+            created_at = created_at.replace(" ", "T", 1) + "Z"
+        return {"run_id": row[0], "scenario": row[1], "status": status, "created_at": created_at}
 
     def set_run_status(self, run_id: str, status: str) -> None:
         with self._connect() as connection:
