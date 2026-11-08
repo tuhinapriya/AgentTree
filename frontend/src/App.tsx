@@ -62,13 +62,18 @@ function App() {
   const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const runIdRef = useRef(runId)
+  const requestInFlight = useRef(false)
   useEffect(() => { runIdRef.current = runId }, [runId])
 
-  const loadDashboard = async (targetRunId: string = runIdRef.current) => {
+  const loadDashboard = async (targetRunId: string = runIdRef.current, allowFallback = false, showLoading = false) => {
+    if (requestInFlight.current) return
     const requestedRunId = targetRunId.trim()
-    const candidates = Array.from(new Set(requestedRunId ? [requestedRunId, ...DEMO_RUN_FALLBACKS.filter((id) => id !== requestedRunId)] : DEMO_RUN_FALLBACKS))
+    const candidates = allowFallback
+      ? Array.from(new Set(requestedRunId ? [requestedRunId, ...DEMO_RUN_FALLBACKS.filter((id) => id !== requestedRunId)] : DEMO_RUN_FALLBACKS))
+      : requestedRunId ? [requestedRunId] : []
     if (!candidates.length) { setError('Run ID is required.'); return }
-    setIsLoading(true)
+    requestInFlight.current = true
+    if (showLoading) setIsLoading(true)
     let lastError: string | null = null
     try {
       for (const candidate of candidates) {
@@ -83,11 +88,14 @@ function App() {
         } catch (e) { lastError = e instanceof Error ? e.message : 'Unable to load dashboard data.' }
       }
       setError(lastError ?? 'Unable to load dashboard data.')
-    } finally { setIsLoading(false) }
+    } finally {
+      requestInFlight.current = false
+      if (showLoading) setIsLoading(false)
+    }
   }
-  useEffect(() => { void loadDashboard() }, [])
+  useEffect(() => { void loadDashboard(runIdRef.current, true, true) }, [])
   useEffect(() => {
-    const timer = window.setInterval(() => { void loadDashboard(runIdRef.current) }, 5000)
+    const timer = window.setInterval(() => { void loadDashboard(runIdRef.current) }, 1500)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -149,7 +157,7 @@ function App() {
       <div className="brand-lockup"><div className="brand-mark">A</div><div><p className="eyebrow">AgentTree / Runtime security</p><h1>Execution Control</h1></div></div>
       <div className="toolbar">
         <label className="run-input"><span>ACTIVE RUN</span><input aria-label="Run ID" value={runId} onChange={(e) => setRunId(e.target.value)} /></label>
-        <button type="button" onClick={() => void loadDashboard(runId)} disabled={isLoading}>{isLoading ? 'Refreshing…' : 'Refresh'}</button>
+        <button type="button" onClick={() => void loadDashboard(runId, false, true)} disabled={isLoading || pendingAction !== null}>{isLoading ? 'Refreshing…' : 'Refresh'}</button>
         {agents.length === 0 && <button type="button" onClick={() => void handleStartRun()} disabled={pendingAction !== null}>{pendingAction === 'start' ? 'Starting…' : 'Start run'}</button>}
         <button type="button" className="secondary" onClick={() => void handleResetDemo()}>Reset demo</button>
       </div>
@@ -201,7 +209,7 @@ function App() {
       <div className="panel"><div className="panel-header"><div><p className="section-kicker">AUDIT TRAIL</p><h2>Authorization events</h2></div><span className="count-pill">{events.length} events</span></div>
         <ul className="event-list">{events.length === 0 ? <li className="empty-state">No authorization events recorded yet.</li> : events.slice(0, 8).map((event, index) => <li key={event.event_seq ?? `${event.agent_id}-${index}`}><div className="event-row"><span className={`event-tag ${(event.decision ?? 'info').toLowerCase()}`}>{event.decision ?? event.type ?? 'INFO'}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.tool ?? 'runtime'}</span>{event.origin && <span className="origin-tag">{event.origin.replaceAll('_', ' ')}</span>}</div><p>{event.detail ?? event.reason_code ?? 'No additional detail'}</p><small>{shortTime(event.timestamp)}{event.event_seq ? ` · #${event.event_seq}` : ''}</small></li>)}</ul>
       </div>
-      <div className="panel"><div className="panel-header"><div><p className="section-kicker">RUNTIME FEED</p><h2>Recent activity</h2></div><span className="live-indicator"><i className="live-dot" />Polling · 5s</span></div>
+      <div className="panel"><div className="panel-header"><div><p className="section-kicker">RUNTIME FEED</p><h2>Recent activity</h2></div><span className="live-indicator"><i className="live-dot" />Persisted snapshot · 1.5s</span></div>
         <ul className="activity-list">{events.length === 0 ? <li className="empty-state">Activity will appear as events are recorded.</li> : events.slice(0, 8).map((event, index) => <li key={`activity-${event.event_seq ?? index}`}><span className="time">{shortTime(event.timestamp)}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.type ?? event.decision ?? 'activity'}</span><em>{event.origin ?? ''}</em></li>)}</ul>
       </div>
     </section>
