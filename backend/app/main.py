@@ -1,0 +1,238 @@
+import json
+from typing import Any, Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from backend.app.db import AgentTreeDB
+from backend.app.services.aws_observability import AWSObservabilityService
+from backend.app.services.bedrock import BedrockService
+from backend.app.services.gateway import GatewayService
+from backend.app.services.hierarchy import HierarchyService
+from backend.app.services.supervisor import SupervisorService
+
+
+class RunCreate(BaseModel):
+    run_id: str
+    scenario: str = "customer-operations"
+
+
+class AgentCreate(BaseModel):
+    agent_id: str
+    role: str
+    parent_agent_id: Optional[str] = None
+    allowed_tools: list[str] = Field(default_factory=list)
+
+
+def build_app(database_path: Optional[str] = None) -> FastAPI:
+    database = AgentTreeDB(database_path)
+    service = HierarchyService(database)
+    supervisor = SupervisorService(database)
+    gateway = GatewayService(database)
+    bedrock = BedrockService(database)
+    observability = AWSObservabilityService(database)
+    app = FastAPI(title="AgentTree")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:5174",
+            "http://0.0.0.0:5173",
+            "http://0.0.0.0:5174",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/health")
+    def get_health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.post("/runs")
+    def create_run(payload: RunCreate) -> dict[str, Any]:
+        try:
+            return service.create_run(payload.run_id, payload.scenario)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/agents")
+    def create_agent(run_id: str, payload: AgentCreate) -> dict[str, Any]:
+        try:
+            return service.create_agent(
+                run_id=run_id,
+                agent_id=payload.agent_id,
+                role=payload.role,
+                parent_agent_id=payload.parent_agent_id,
+                allowed_tools=payload.allowed_tools,
+            )
+        except ValueError as exc:
+            status_code = 404 if "Run" in str(exc) or "Unknown parent" in str(exc) else 409
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/tree")
+    def get_hierarchy(run_id: str) -> dict[str, Any]:
+        try:
+            return service.get_hierarchy(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/supervise")
+    def supervise_run(run_id: str, payload: dict[str, list[str]]) -> dict[str, Any]:
+        try:
+            return supervisor.launch(run_id, payload.get("agent_ids", []))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/agents/{agent_id}")
+    def get_agent_status(run_id: str, agent_id: str) -> dict[str, Any]:
+        agent = database.get_agent(run_id, agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' was not found")
+        return agent
+
+    @app.post("/runs/{run_id}/agents/{agent_id}/stop")
+    def stop_agent(run_id: str, agent_id: str) -> dict[str, Any]:
+        try:
+            return supervisor.stop_agent(run_id, agent_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/monitor")
+    def monitor_run(run_id: str) -> dict[str, Any]:
+        try:
+            return supervisor.monitor_run(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/cleanup")
+    def cleanup_run(run_id: str) -> dict[str, Any]:
+        try:
+            return supervisor.cleanup_run(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/gateway/credentials")
+    def issue_gateway_credential(run_id: str, payload: dict[str, str]) -> dict[str, Any]:
+        agent_id = payload.get("agent_id", "")
+        try:
+            return gateway.issue_credential(run_id, agent_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/gateway/execute")
+    def execute_gateway_tool(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        agent_id = payload.get("agent_id")
+        credential = payload.get("credential")
+        tool_name = payload.get("tool")
+        arguments = payload.get("arguments", {})
+        origin = payload.get("origin", "STANDARD")
+
+        try:
+            return gateway.execute(run_id, agent_id, credential, tool_name, arguments, origin)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 401 if "credential" in str(exc).lower() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/branches/{branch_id}/stop")
+    def stop_branch(run_id: str, branch_id: str) -> dict[str, Any]:
+        try:
+            branch_members = gateway.revoke_branch(run_id, branch_id)
+            for agent_id in branch_members:
+                try:
+                    supervisor.stop_agent(run_id, agent_id)
+                except ValueError:
+                    pass
+            return {"run_id": run_id, "branch_id": branch_id, "status": "STOPPED", "agents": branch_members}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/bedrock/delegate")
+    def delegate_with_bedrock(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        parent_agent_id = payload.get("parent_agent_id")
+        customer_request = payload.get("customer_request", "")
+        try:
+            return bedrock.delegate(run_id, parent_agent_id, customer_request)
+        except ValueError as exc:
+            status_code = 400 if "Unsupported delegated role" in str(exc) else 404
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/events")
+    def get_run_events(run_id: str) -> dict[str, Any]:
+        try:
+            return {"run_id": run_id, "events": gateway.get_events(run_id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/events/stream")
+    def stream_run_events(run_id: str):
+        def event_generator():
+            yield "event: connected\n"
+            yield f"data: {json.dumps({'run_id': run_id, 'type': 'connected'})}\n\n"
+            for event in gateway.get_events(run_id):
+                yield "event: message\n"
+                yield f"data: {json.dumps(event)}\n\n"
+            yield "event: heartbeat\n"
+            yield f"data: {json.dumps({'run_id': run_id, 'type': 'heartbeat'})}\n\n"
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    @app.get("/runs/{run_id}/dashboard")
+    def get_dashboard(run_id: str) -> dict[str, Any]:
+        try:
+            return {
+                "run_id": run_id,
+                "hierarchy": service.get_hierarchy(run_id),
+                "events": gateway.get_events(run_id),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/demo/reset")
+    def reset_demo(run_id: str) -> dict[str, Any]:
+        try:
+            return gateway.reset_demo(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/demo/state")
+    def get_demo_state(run_id: str) -> dict[str, Any]:
+        try:
+            return gateway.get_demo_state(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/aws/status")
+    def get_aws_status(run_id: str) -> dict[str, Any]:
+        try:
+            return observability.status(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/aws/export")
+    def export_aws_events(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            events = payload.get("events", [])
+            return observability.export_events(run_id, events)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/aws/events")
+    def get_aws_events(run_id: str) -> dict[str, Any]:
+        try:
+            return {"run_id": run_id, "records": observability.get_events(run_id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return app
+
+
+app = build_app()
