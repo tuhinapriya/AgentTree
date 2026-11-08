@@ -38,3 +38,43 @@ def test_bedrock_delegation_uses_converse_request_format(tmp_path):
     assert kwargs["modelId"] == service.model_id
     assert kwargs["messages"][0]["content"][0]["text"]
     assert kwargs["inferenceConfig"]["maxTokens"] == 256
+
+
+
+
+def test_bedrock_agent_tool_config_is_limited_by_trusted_role():
+    account_tools = BedrockService._tool_specs("account")
+    order_tools = BedrockService._tool_specs("order")
+    account_names = {item["toolSpec"]["name"] for item in account_tools}
+    order_names = {item["toolSpec"]["name"] for item in order_tools}
+
+    assert account_names == {"read_account", "stage_promo_credit"}
+    assert order_names == {"read_order", "stage_refund"}
+    assert all("inputSchema" in item["toolSpec"] for item in account_tools + order_tools)
+
+
+def test_model_delegation_cannot_select_a_different_agent_or_role(tmp_path):
+    database = AgentTreeDB(str(tmp_path / "bedrock-delegation-policy.db"))
+    database.create_run("delegation-policy-run", "customer-operations")
+    database.create_agent("delegation-policy-run", "parent-agent", None, "parent", [])
+    database.create_agent("delegation-policy-run", "order-agent", "parent-agent", "order", ["read_orders"])
+    database.create_agent("delegation-policy-run", "account-agent", "parent-agent", "account", ["read_account"])
+    service = BedrockService(database)
+
+    result = service._validate_model_delegations(
+        "delegation-policy-run",
+        [
+            {"agent_id": "account-agent", "role": "order", "task": "escalate"},
+            {"agent_id": "not-configured", "role": "account", "task": "read account"},
+            {"agent_id": "order-agent", "role": "order", "task": "approved order task"},
+        ],
+        ["order"],
+        [],
+    )
+
+    assert result == [{
+        "agent_id": "order-agent",
+        "role": "order",
+        "task": "approved order task",
+        "approved": True,
+    }]

@@ -80,6 +80,7 @@ class AgentTreeDB:
                     run_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL,
                     branch_id TEXT NOT NULL,
+                    origin TEXT NOT NULL DEFAULT 'CONTROLLED_TEST',
                     created_at TEXT NOT NULL,
                     revoked_at TEXT,
                     FOREIGN KEY (run_id, agent_id) REFERENCES agents(run_id, agent_id),
@@ -87,6 +88,11 @@ class AgentTreeDB:
                 )
                 """
             )
+            session_columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_sessions)")}
+            if "origin" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE agent_sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'CONTROLLED_TEST'"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS business_accounts (

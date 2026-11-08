@@ -9,6 +9,7 @@ from typing import Any
 from backend.app.services.demo_policy import (
     BRANCH_POLICIES,
     BranchState,
+    EventOrigin,
     KNOWN_TOOLS,
 )
 from backend.app.services.staging import StagingService
@@ -40,7 +41,10 @@ class GatewayService:
             },
         }
 
-    def issue_credential(self, run_id: str, agent_id: str) -> dict[str, str]:
+    def issue_credential(
+        self, run_id: str, agent_id: str,
+        origin: str = EventOrigin.CONTROLLED_TEST.value,
+    ) -> dict[str, str]:
         if not self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' does not exist")
 
@@ -61,11 +65,38 @@ class GatewayService:
         with self.database._connect() as connection:
             connection.execute(
                 """INSERT INTO agent_sessions
-                   (token_hash, run_id, agent_id, branch_id, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (token_hash, run_id, agent_id, agent["branch_id"], datetime.now(timezone.utc).isoformat()),
+                   (token_hash, run_id, agent_id, branch_id, origin, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (token_hash, run_id, agent_id, agent["branch_id"], origin,
+                 datetime.now(timezone.utc).isoformat()),
             )
         return {"run_id": run_id, "agent_id": agent_id, "credential": token}
+
+    def authenticate_agent(self, run_id: str, agent_id: str, credential: str) -> dict[str, Any]:
+        """Resolve a capability token to its persisted owner and live branch."""
+        if not credential:
+            raise ValueError("Missing credentials")
+        with self.database._connect() as connection:
+            session = connection.execute(
+                """SELECT agent_id, branch_id, revoked_at FROM agent_sessions
+                   WHERE run_id = ? AND token_hash = ?""",
+                (run_id, self._hash_token(credential)),
+            ).fetchone()
+        if session is None:
+            raise ValueError("Invalid credentials")
+        if session[2] is not None or session[0] != agent_id:
+            raise PermissionError("Permission denied")
+        agent = self.database.get_agent(run_id, agent_id)
+        if agent is None:
+            raise ValueError(f"Agent '{agent_id}' was not found in run '{run_id}'")
+        with self.database._connect() as connection:
+            branch = connection.execute(
+                "SELECT state FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, session[1]),
+            ).fetchone()
+        if branch is None or branch[0] != BranchState.RUNNING.value:
+            raise PermissionError("Permission denied")
+        return agent
 
     def execute(
         self,
@@ -75,21 +106,23 @@ class GatewayService:
         tool_name: str,
         arguments: dict[str, Any],
         origin: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        origin = origin or "STANDARD"
+        origin = EventOrigin.CONTROLLED_TEST.value
         if credential is None or credential == "":
             self.record_event(run_id, agent_id, tool_name, "DENY", "MISSING_CREDENTIAL", origin)
             raise ValueError("Missing credentials")
 
         with self.database._connect() as connection:
             session = connection.execute(
-                """SELECT agent_id, branch_id, revoked_at FROM agent_sessions
+                """SELECT agent_id, branch_id, revoked_at, origin FROM agent_sessions
                    WHERE run_id = ? AND token_hash = ?""",
                 (run_id, self._hash_token(credential)),
             ).fetchone()
         if session is None:
             self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_CREDENTIAL", origin)
             raise ValueError("Invalid credentials")
+        origin = session[3]
         if session[2] is not None:
             self.record_event(run_id, agent_id, tool_name, "DENY", "BRANCH_STOPPED", origin)
             raise PermissionError("Permission denied")
@@ -126,7 +159,7 @@ class GatewayService:
             raise ValueError("Tool arguments must be an object")
 
         try:
-            result = self._dispatch_tool(run_id, session[1], tool_name, arguments, origin)
+            result = self._dispatch_tool(run_id, session[1], tool_name, arguments, origin, idempotency_key)
         except PermissionError:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
             self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy)
@@ -274,7 +307,7 @@ class GatewayService:
 
     def _dispatch_tool(
         self, run_id: str, branch_id: str, tool_name: str,
-        arguments: dict[str, Any], origin: str,
+        arguments: dict[str, Any], origin: str, idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         if tool_name == "read_order":
             order_id = self._require_str(arguments, "order_id")
@@ -283,14 +316,18 @@ class GatewayService:
         if tool_name == "stage_refund":
             order_id = self._require_str(arguments, "order_id")
             amount_cents = arguments.get("amount_cents")
-            staged = self.staging.stage_refund(run_id, branch_id, order_id, amount_cents, origin=origin)
+            staged = self.staging.stage_refund(
+                run_id, branch_id, order_id, amount_cents,
+                idempotency_key=idempotency_key, origin=origin,
+            )
             return {"tool": tool_name, "result": staged}
 
         if tool_name == "stage_promo_credit":
             customer_id = self._require_str(arguments, "customer_id")
             amount_cents = arguments.get("amount_cents")
             staged = self.staging.stage_promo_credit(
-                run_id, branch_id, customer_id, amount_cents, origin=origin
+                run_id, branch_id, customer_id, amount_cents,
+                idempotency_key=idempotency_key, origin=origin,
             )
             return {"tool": tool_name, "result": staged}
 

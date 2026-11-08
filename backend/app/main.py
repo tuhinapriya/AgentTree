@@ -1,7 +1,7 @@
 import json
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -32,6 +32,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
     service = HierarchyService(database)
     supervisor = SupervisorService(database)
     gateway = GatewayService(database, supervisor)
+    supervisor.gateway = gateway
     staging = StagingService(database)
     bedrock = BedrockService(database)
     observability = AWSObservabilityService(database)
@@ -84,9 +85,15 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/runs/{run_id}/supervise")
-    def supervise_run(run_id: str, payload: dict[str, list[str]]) -> dict[str, Any]:
+    def supervise_run(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            return supervisor.launch(run_id, payload.get("agent_ids", []))
+            agent_ids = payload.get("agent_ids", [])
+            tasks = payload.get("tasks", {})
+            if not isinstance(agent_ids, list) or not all(isinstance(item, str) for item in agent_ids):
+                raise ValueError("agent_ids must be an array of strings")
+            if not isinstance(tasks, dict) or not all(isinstance(value, str) for value in tasks.values()):
+                raise ValueError("tasks must map agent IDs to task strings")
+            return supervisor.launch(run_id, agent_ids, tasks)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -133,9 +140,10 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
         tool_name = payload.get("tool")
         arguments = payload.get("arguments", {})
         origin = payload.get("origin", "STANDARD")
+        idempotency_key = payload.get("idempotency_key")
 
         try:
-            return gateway.execute(run_id, agent_id, credential, tool_name, arguments, origin)
+            return gateway.execute(run_id, agent_id, credential, tool_name, arguments, origin, idempotency_key)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
@@ -180,10 +188,60 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
         parent_agent_id = payload.get("parent_agent_id")
         customer_request = payload.get("customer_request", "")
         try:
-            return bedrock.delegate(run_id, parent_agent_id, customer_request)
+            result = bedrock.delegate(run_id, parent_agent_id, customer_request)
+            origin = "MODEL" if bedrock._aws_ready else "CONTROLLED_TEST"
+            gateway.record_event(run_id, parent_agent_id, "bedrock.delegate", "ALLOW", None, origin)
+            result["origin"] = origin
+            return result
         except ValueError as exc:
             status_code = 400 if "Unsupported delegated role" in str(exc) else 404
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/agents/{agent_id}/model/converse")
+    def converse_for_agent(
+        run_id: str,
+        agent_id: str,
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        scheme, _, credential = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not credential:
+            raise HTTPException(status_code=401, detail="Missing agent credentials")
+        try:
+            agent = gateway.authenticate_agent(run_id, agent_id, credential)
+            messages = payload.get("messages")
+            if not isinstance(messages, list) or not messages:
+                raise ValueError("messages must be a non-empty array")
+            result = bedrock.converse_agent(agent["role"], messages)
+            gateway.record_event(run_id, agent_id, "bedrock.converse", "ALLOW", None, "MODEL")
+            return result
+        except PermissionError as exc:
+            gateway.record_event(run_id, agent_id, "bedrock.converse", "DENY", "INVALID_CREDENTIAL", "MODEL")
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/runs/{run_id}/agents/{agent_id}/complete")
+    def complete_worker_task(
+        run_id: str,
+        agent_id: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        scheme, _, credential = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not credential:
+            raise HTTPException(status_code=401, detail="Missing agent credentials")
+        try:
+            gateway.authenticate_agent(run_id, agent_id, credential)
+            supervisor.verify_worker_completion(run_id, agent_id)
+            return staging.mark_ready_to_commit(
+                run_id, agent_id, verified_completion=True, origin="SUPERVISOR"
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/events")
     def get_run_events(run_id: str, after_seq: int = Query(default=0, ge=0)) -> dict[str, Any]:

@@ -1,7 +1,11 @@
 from fastapi.testclient import TestClient
+from unittest.mock import patch
 
 from backend.app.db import AgentTreeDB
 from backend.app.main import build_app
+from backend.app.services.gateway import GatewayService
+from backend.app.services.gateway import GatewayService
+from backend.app.services.bedrock import BedrockService
 
 
 def _create_agents(client, run_id):
@@ -173,3 +177,60 @@ def test_scope_and_amount_policy_denials_do_not_stage_effects(tmp_path):
             assert connection.execute(
                 "SELECT COUNT(*) FROM journal WHERE run_id = ?", (run_id,)
             ).fetchone()[0] == 0
+
+
+def test_model_proxy_requires_agent_credential_and_uses_server_role(tmp_path):
+    client = TestClient(build_app(str(tmp_path / "model-proxy.db")))
+    run_id = "model-proxy-run"
+    _create_agents(client, run_id)
+    token = client.post(
+        f"/runs/{run_id}/gateway/credentials", json={"agent_id": "account-agent"}
+    ).json()["credential"]
+    expected = {"message": {"role": "assistant", "content": [{"text": "Review complete"}]}}
+
+    with patch.object(BedrockService, "converse_agent", return_value=expected) as converse:
+        unauthenticated = client.post(
+            f"/runs/{run_id}/agents/account-agent/model/converse",
+            json={"messages": [{"role": "user", "content": [{"text": "Review C104"}]}]},
+        )
+        authenticated = client.post(
+            f"/runs/{run_id}/agents/account-agent/model/converse",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"messages": [{"role": "user", "content": [{"text": "Review C104"}]}]},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert authenticated.status_code == 200
+    assert authenticated.json() == expected
+    converse.assert_called_once_with("account", [{"role": "user", "content": [{"text": "Review C104"}]}])
+
+
+
+
+def test_tool_event_origin_comes_from_server_issued_credential(tmp_path):
+    database = AgentTreeDB(str(tmp_path / "event-origin.db"))
+    database.create_run("event-origin-run", "customer-operations")
+    database.create_demo_fixtures("event-origin-run")
+    database.create_agent("event-origin-run", "parent-agent", None, "parent", [])
+    database.create_agent("event-origin-run", "account-agent", "parent-agent", "account", ["read_account"])
+    gateway = GatewayService(database)
+    credential = gateway.issue_credential("event-origin-run", "account-agent")["credential"]
+
+    gateway.execute(
+        "event-origin-run", "account-agent", credential, "read_account",
+        {"customer_id": "C104"}, origin="MODEL",
+    )
+
+    events = gateway.get_events("event-origin-run")
+    assert events[-1]["decision"] == "ALLOW"
+    assert events[-1]["origin"] == "CONTROLLED_TEST"
+
+
+    worker_credential = gateway.issue_credential(
+        "event-origin-run", "account-agent", origin="MODEL"
+    )["credential"]
+    gateway.execute(
+        "event-origin-run", "account-agent", worker_credential, "read_account",
+        {"customer_id": "C104"}, origin="CONTROLLED_TEST",
+    )
+    assert gateway.get_events("event-origin-run")[-1]["origin"] == "MODEL"

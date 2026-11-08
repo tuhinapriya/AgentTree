@@ -9,10 +9,13 @@ from typing import Any, Optional
 
 import psutil
 
+from backend.app.services.demo_policy import EventOrigin
+
 
 class SupervisorService:
     def __init__(self, database):
         self.database = database
+        self.gateway = None
         self.processes: dict[str, dict[str, Any]] = {}
 
     def _process_alive(self, pid: int) -> bool:
@@ -22,17 +25,38 @@ class SupervisorService:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
-    def launch(self, run_id: str, agent_ids: list[str]) -> dict[str, Any]:
+    def launch(self, run_id: str, agent_ids: list[str], tasks: Optional[dict[str, str]] = None) -> dict[str, Any]:
         if not self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' does not exist")
 
         started: list[dict[str, Any]] = []
+        tasks = tasks or {}
+        unknown_task_agents = set(tasks) - set(agent_ids)
+        if unknown_task_agents:
+            raise ValueError(f"Tasks reference agents that are not being launched: {sorted(unknown_task_agents)}")
         for agent_id in agent_ids:
             agent = self.database.get_agent(run_id, agent_id)
             if agent is None:
                 raise ValueError(f"Agent '{agent_id}' does not exist in run '{run_id}'")
+            with self.database._connect() as connection:
+                branch = connection.execute(
+                    "SELECT state FROM branches WHERE run_id = ? AND branch_id = ?",
+                    (run_id, agent["branch_id"]),
+                ).fetchone()
+            if branch is None or branch[0] != "RUNNING":
+                raise ValueError(f"Branch '{agent['branch_id']}' is not launchable")
 
-            process, worker_ready = self._spawn_agent_process(run_id, agent)
+            task = tasks.get(agent_id)
+            credential = None
+            if task:
+                if agent["role"] not in {"order", "account"}:
+                    raise ValueError("Only predefined child roles can receive model tasks")
+                if self.gateway is None:
+                    raise RuntimeError("Gateway is not configured for worker launch")
+                credential = self.gateway.issue_credential(
+                    run_id, agent_id, origin=EventOrigin.MODEL.value
+                )["credential"]
+            process, worker_ready = self._spawn_agent_process(run_id, agent, task, credential)
             self.processes.setdefault(run_id, {})[agent_id] = process
             timestamp = datetime.fromtimestamp(
                 psutil.Process(process.pid).create_time(), timezone.utc
@@ -110,6 +134,21 @@ class SupervisorService:
         self.processes.get(run_id, {}).pop(agent_id, None)
         return {"run_id": run_id, "agent_id": agent_id, "status": "STOPPED", "pid": pid}
 
+    def verify_worker_completion(self, run_id: str, agent_id: str) -> dict[str, Any]:
+        """Accept completion only from an authenticated, live managed worker."""
+        agent = self.database.get_agent(run_id, agent_id)
+        if agent is None:
+            raise ValueError(f"Agent '{agent_id}' does not exist in run '{run_id}'")
+        process = self.processes.get(run_id, {}).get(agent_id)
+        if process is None or process.poll() is not None or agent["status"] != "RUNNING":
+            raise ValueError("Managed worker is not running")
+        if agent["role"] not in {"order", "account"}:
+            raise ValueError("Only child workers can complete a business task")
+        updated = self.database.update_agent_state(
+            run_id, agent_id, task_state="COMPLETED"
+        )
+        return {"run_id": run_id, "agent_id": agent_id, "task_state": updated["task_state"]}
+
     def monitor_run(self, run_id: str) -> dict[str, Any]:
         if not self.database.run_exists(run_id):
             raise ValueError(f"Run '{run_id}' does not exist")
@@ -158,7 +197,13 @@ class SupervisorService:
         self.processes.pop(run_id, None)
         return {"run_id": run_id, "status": "CLEANED"}
 
-    def _spawn_agent_process(self, run_id: str, agent: dict[str, Any]) -> tuple[subprocess.Popen, dict[str, Any]]:
+    def _spawn_agent_process(
+        self,
+        run_id: str,
+        agent: dict[str, Any],
+        task: str | None = None,
+        credential: str | None = None,
+    ) -> tuple[subprocess.Popen, dict[str, Any]]:
         worker_path = Path(__file__).resolve().parents[3] / "agents" / "worker.py"
         command = [
             sys.executable,
@@ -167,12 +212,18 @@ class SupervisorService:
             "--agent-id", agent["agent_id"],
             "--role", agent["role"],
         ]
+        worker_env = {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
+        if task and credential:
+            worker_env["AGENTTREE_TASK"] = task
+            worker_env["AGENTTREE_CREDENTIAL"] = credential
+            worker_env["AGENTTREE_BASE_URL"] = os.getenv("AGENTTREE_BASE_URL", "http://127.0.0.1:8000")
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            env=worker_env,
             start_new_session=True,
         )
         try:
