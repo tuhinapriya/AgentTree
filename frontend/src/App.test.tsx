@@ -6,9 +6,9 @@ import App from './App'
 let fetchMock: ReturnType<typeof vi.fn>
 
 const mockDashboard = {
-  run_id: 'run-demo',
+  run_id: 'run-demo-verify',
   hierarchy: {
-    run_id: 'run-demo',
+    run_id: 'run-demo-verify',
     nodes: [
       {
         agent_id: 'parent-agent',
@@ -80,6 +80,15 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
 })
 
+test('loads the verified demo run by default', async () => {
+  render(<App />)
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    expect.stringContaining('/runs/run-demo-verify/dashboard'),
+    expect.any(Object),
+  )
+})
+
 test('renders dashboard panels and agent list', async () => {
   render(<App />)
 
@@ -97,7 +106,7 @@ test('stop branch trigger calls the branch stop endpoint', async () => {
   await user.click(screen.getByRole('button', { name: /^Stop branch$/i }))
 
   expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/run-demo/branches/parent-agent/stop'),
+    expect.stringContaining('/runs/run-demo-verify/branches/parent-agent/stop'),
     expect.objectContaining({ method: 'POST' }),
   )
 })

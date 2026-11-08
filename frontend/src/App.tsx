@@ -47,8 +47,10 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+const DEMO_RUN_FALLBACKS = ['run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
+
 function App() {
-  const [runId, setRunId] = useState('run-demo')
+  const [runId, setRunId] = useState(DEMO_RUN_FALLBACKS[0])
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState('parent-agent')
   const [isLoading, setIsLoading] = useState(false)
@@ -60,23 +62,40 @@ function App() {
   }, [runId])
 
   const loadDashboard = async (targetRunId: string = runIdRef.current) => {
-    const trimmedRunId = targetRunId.trim()
-    if (!trimmedRunId) {
+    const requestedRunId = targetRunId.trim()
+    const candidateRunIds = Array.from(
+      new Set(
+        requestedRunId ? [requestedRunId, ...DEMO_RUN_FALLBACKS.filter((candidate) => candidate !== requestedRunId)] : DEMO_RUN_FALLBACKS,
+      ),
+    )
+
+    if (candidateRunIds.length === 0) {
       setError('Run ID is required.')
       return
     }
 
     setIsLoading(true)
+
+    let lastError: string | null = null
+
     try {
-      const payload = await fetchJson<DashboardPayload>(`/runs/${trimmedRunId}/dashboard`)
-      setDashboard(payload)
-      const hierarchyNodes = payload.hierarchy.nodes ?? payload.hierarchy.agents ?? []
-      if (hierarchyNodes.length > 0 && !hierarchyNodes.some((agent) => agent.agent_id === selectedAgentId)) {
-        setSelectedAgentId(hierarchyNodes[0].agent_id)
+      for (const candidateRunId of candidateRunIds) {
+        try {
+          const payload = await fetchJson<DashboardPayload>(`/runs/${candidateRunId}/dashboard`)
+          setRunId(candidateRunId)
+          setDashboard(payload)
+          const hierarchyNodes = payload.hierarchy.nodes ?? payload.hierarchy.agents ?? []
+          if (hierarchyNodes.length > 0 && !hierarchyNodes.some((agent) => agent.agent_id === selectedAgentId)) {
+            setSelectedAgentId(hierarchyNodes[0].agent_id)
+          }
+          setError(null)
+          return
+        } catch (requestError) {
+          lastError = requestError instanceof Error ? requestError.message : 'Unable to load dashboard data.'
+        }
       }
-      setError(null)
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to load dashboard data.')
+
+      setError(lastError ?? 'Unable to load dashboard data.')
     } finally {
       setIsLoading(false)
     }
