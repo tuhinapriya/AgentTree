@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 from backend.app.db import AgentTreeDB
 from backend.app.services.bedrock import BedrockService
+from backend.app.services.demo_policy import BRANCH_POLICIES, TOOL_MODIFY_BILLING
 
 
 def test_bedrock_service_uses_real_model_result_when_aws_is_ready(tmp_path):
@@ -10,7 +11,6 @@ def test_bedrock_service_uses_real_model_result_when_aws_is_ready(tmp_path):
     database.create_agent("run-real-bedrock", "parent-agent", None, "parent", ["read_orders", "process_order"])
     database.create_agent("run-real-bedrock", "order-agent", "parent-agent", "order", ["read_orders", "process_order"])
     database.create_agent("run-real-bedrock", "account-agent", "parent-agent", "account", ["read_account"])
-
     service = BedrockService(database)
     service._aws_ready = True
 
@@ -21,6 +21,7 @@ def test_bedrock_service_uses_real_model_result_when_aws_is_ready(tmp_path):
 
     assert payload["delegations"][0]["agent_id"] == "order-agent"
     assert payload["delegations"][0]["role"] == "order"
+    assert payload["origin"] == "MODEL"
 
 
 def test_bedrock_delegation_uses_converse_request_format(tmp_path):
@@ -28,7 +29,7 @@ def test_bedrock_delegation_uses_converse_request_format(tmp_path):
     service = BedrockService(database)
     client = MagicMock()
     client.converse.return_value = {
-        "output": {"message": {"content": [{"text": '{"delegations": []}'}]}}
+        "output": {"message": {"content": [{"text": 'Here is the result:\n```json\n{"delegations": []}\n```'}]}}
     }
 
     with patch("boto3.client", return_value=client):
@@ -48,12 +49,31 @@ def test_bedrock_agent_tool_config_is_limited_by_trusted_role():
     account_names = {item["toolSpec"]["name"] for item in account_tools}
     order_names = {item["toolSpec"]["name"] for item in order_tools}
 
-    assert account_names == {"read_account", "stage_promo_credit"}
+    assert account_names == {"read_account", "stage_promo_credit", "modify_billing"}
     assert order_names == {"read_order", "stage_refund"}
+    assert TOOL_MODIFY_BILLING not in BRANCH_POLICIES["account"].allowed_tools
     assert all("inputSchema" in item["toolSpec"] for item in account_tools + order_tools)
 
 
-def test_model_delegation_cannot_select_a_different_agent_or_role(tmp_path):
+def test_fallback_child_tasks_keep_the_customer_request_and_are_labeled_controlled(tmp_path):
+    database = AgentTreeDB(str(tmp_path / "bedrock-fallback-tasks.db"))
+    database.create_run("fallback-task-run", "customer-operations")
+    database.create_agent("fallback-task-run", "parent-agent", None, "parent", [])
+    database.create_agent("fallback-task-run", "order-agent", "parent-agent", "order", ["read_order"])
+    database.create_agent("fallback-task-run", "account-agent", "parent-agent", "account", ["read_account"])
+    service = BedrockService(database)
+    service._aws_ready = False
+
+    result = service.delegate(
+        "fallback-task-run", "parent-agent",
+        "Inspect order ORD-882 and account C104 for this customer request.",
+    )
+
+    assert result["origin"] == "CONTROLLED_TEST"
+    assert all("ORD-882" in item["task"] and "C104" in item["task"] for item in result["delegations"])
+
+
+def test_model_delegation_cannot_select_a_different_agent_by_id(tmp_path):
     database = AgentTreeDB(str(tmp_path / "bedrock-delegation-policy.db"))
     database.create_run("delegation-policy-run", "customer-operations")
     database.create_agent("delegation-policy-run", "parent-agent", None, "parent", [])
@@ -75,6 +95,6 @@ def test_model_delegation_cannot_select_a_different_agent_or_role(tmp_path):
     assert result == [{
         "agent_id": "order-agent",
         "role": "order",
-        "task": "approved order task",
+        "task": "escalate\napproved order task",
         "approved": True,
     }]

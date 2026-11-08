@@ -190,9 +190,8 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
         customer_request = payload.get("customer_request", "")
         try:
             result = bedrock.delegate(run_id, parent_agent_id, customer_request)
-            origin = "MODEL" if bedrock._aws_ready else "CONTROLLED_TEST"
+            origin = result["origin"]
             gateway.record_event(run_id, parent_agent_id, "bedrock.delegate", "ALLOW", None, origin)
-            result["origin"] = origin
             return result
         except ValueError as exc:
             status_code = 400 if "Unsupported delegated role" in str(exc) else 404
