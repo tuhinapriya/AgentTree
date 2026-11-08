@@ -80,11 +80,11 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
 })
 
-test('loads the verified demo run by default', async () => {
+test('loads the transactional demo run by default', async () => {
   render(<App />)
 
   expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/run-demo-verify/dashboard'),
+    expect.stringContaining('/runs/agenttree-transactional-demo/dashboard'),
     expect.any(Object),
   )
 })
@@ -106,7 +106,7 @@ test('stop branch trigger calls the branch stop endpoint', async () => {
   await user.click(screen.getByRole('button', { name: /^Contain branch$/i }))
 
   expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/run-demo-verify/branches/parent-agent/stop'),
+    expect.stringContaining('/runs/agenttree-transactional-demo/branches/parent-agent/stop'),
     expect.objectContaining({ method: 'POST' }),
   )
 })

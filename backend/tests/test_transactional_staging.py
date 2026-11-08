@@ -70,3 +70,21 @@ def test_commit_retry_is_idempotent_and_worker_cannot_claim_verified_completion(
     assert second["state"] == "COMMITTED"
     assert second["actions"] == []
     assert staging.read_order(run_id, "order-agent")["refunded_cents"] == 4500
+
+
+def test_abort_wins_before_commit_and_pending_effect_stays_unapplied(tmp_path):
+    _, staging, run_id = _service(tmp_path)
+    staging.stage_refund(run_id, "order-agent", "ORD-882", 4500, "refund-stop-race")
+
+    aborted = staging.abort_branch(run_id, "order-agent", reason="POLICY_VIOLATION")
+    assert aborted["state"] == "ABORTED"
+
+    try:
+        staging.commit_branch(run_id, "order-agent")
+    except ValueError as exc:
+        assert "not eligible" in str(exc)
+    else:
+        raise AssertionError("an aborted branch must not commit")
+
+    assert staging.read_order(run_id, "order-agent")["refunded_cents"] == 0
+    assert staging.get_effects(run_id)["effects"][0]["state"] == "ABORTED"

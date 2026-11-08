@@ -117,7 +117,10 @@ def reset_command(args):
 def demo_command(args):
     from demo.run_demo import run_demo_sequence
 
-    print_json(run_demo_sequence(_base(args.base_url), args.run_id))
+    try:
+        print_json(run_demo_sequence(_base(args.base_url), args.run_id))
+    except Exception as exc:
+        raise RuntimeError(f"Demo failed: {exc}") from exc
 
 
 def build_parser():
