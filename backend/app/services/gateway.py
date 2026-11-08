@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-import uuid
+import hashlib
+import secrets
+from datetime import datetime, timezone
 from typing import Any
+
+from backend.app.services.demo_policy import (
+    BranchState,
+    KNOWN_TOOLS,
+)
 
 
 class GatewayService:
     def __init__(self, database):
         self.database = database
-        self.credentials: dict[str, dict[str, str]] = {}
-        self.revoked_credentials: dict[str, set[str]] = {}
         self.events: dict[str, list[dict[str, Any]]] = {}
         self.business_db = self._initial_business_state()
 
@@ -39,8 +44,23 @@ class GatewayService:
         if agent is None:
             raise ValueError(f"Agent '{agent_id}' was not found in run '{run_id}'")
 
-        token = f"{run_id}:{agent_id}:{uuid.uuid4().hex}"
-        self.credentials.setdefault(run_id, {})[token] = agent_id
+        with self.database._connect() as connection:
+            branch = connection.execute(
+                "SELECT state FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, agent["branch_id"]),
+            ).fetchone()
+        if branch is None or branch[0] != BranchState.RUNNING.value:
+            raise PermissionError("Branch is stopped")
+
+        token = secrets.token_urlsafe(32)
+        token_hash = self._hash_token(token)
+        with self.database._connect() as connection:
+            connection.execute(
+                """INSERT INTO agent_sessions
+                   (token_hash, run_id, agent_id, branch_id, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (token_hash, run_id, agent_id, agent["branch_id"], datetime.now(timezone.utc).isoformat()),
+            )
         return {"run_id": run_id, "agent_id": agent_id, "credential": token}
 
     def execute(
@@ -57,15 +77,19 @@ class GatewayService:
             self.record_event(run_id, agent_id, tool_name, "DENY", "MISSING_CREDENTIAL", origin)
             raise ValueError("Missing credentials")
 
-        if credential in self.revoked_credentials.get(run_id, set()):
-            self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
-            raise PermissionError("Permission denied")
-
-        token_owner = self.credentials.get(run_id, {}).get(credential)
-        if token_owner is None:
+        with self.database._connect() as connection:
+            session = connection.execute(
+                """SELECT agent_id, branch_id, revoked_at FROM agent_sessions
+                   WHERE run_id = ? AND token_hash = ?""",
+                (run_id, self._hash_token(credential)),
+            ).fetchone()
+        if session is None:
             self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_CREDENTIAL", origin)
             raise ValueError("Invalid credentials")
-        if token_owner != agent_id:
+        if session[2] is not None:
+            self.record_event(run_id, agent_id, tool_name, "DENY", "BRANCH_STOPPED", origin)
+            raise PermissionError("Permission denied")
+        if session[0] != agent_id:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
             raise PermissionError("Permission denied")
 
@@ -73,6 +97,15 @@ class GatewayService:
         if agent is None:
             self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_CREDENTIAL", origin)
             raise ValueError(f"Agent '{agent_id}' was not found in run '{run_id}'")
+
+        with self.database._connect() as connection:
+            branch = connection.execute(
+                "SELECT state FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, session[1]),
+            ).fetchone()
+        if branch is None or branch[0] != BranchState.RUNNING.value:
+            self.record_event(run_id, agent_id, tool_name, "DENY", "BRANCH_STOPPED", origin)
+            raise PermissionError("Permission denied")
 
         if tool_name not in self._known_tools():
             self.record_event(run_id, agent_id, tool_name, "DENY", "UNKNOWN_TOOL", origin)
@@ -95,10 +128,23 @@ class GatewayService:
             raise ValueError(f"Run '{run_id}' does not exist")
 
         branch_members = self._branch_members(run_id, branch_id)
-        for token, owner in list(self.credentials.get(run_id, {}).items()):
-            if owner in branch_members:
-                self.revoked_credentials.setdefault(run_id, set()).add(token)
-                del self.credentials[run_id][token]
+        timestamp = datetime.now(timezone.utc).isoformat()
+        placeholders = ",".join("?" for _ in branch_members)
+        branch_ids = list({self.database.get_agent(run_id, member)["branch_id"] for member in branch_members})
+        branch_placeholders = ",".join("?" for _ in branch_ids)
+        with self.database._connect() as connection:
+            connection.execute(
+                f"""UPDATE agent_sessions SET revoked_at = ?
+                    WHERE run_id = ? AND agent_id IN ({placeholders}) AND revoked_at IS NULL""",
+                (timestamp, run_id, *branch_members),
+            )
+            connection.execute(
+                f"""UPDATE branches SET state = ?, aborted_at = ?
+                    WHERE run_id = ? AND branch_id IN ({branch_placeholders})
+                    AND state NOT IN (?, ?)""",
+                (BranchState.ABORTED.value, timestamp, run_id, *branch_ids,
+                 BranchState.COMMITTED.value, BranchState.COMMITTING.value),
+            )
         return branch_members
 
     def get_events(self, run_id: str) -> list[dict[str, Any]]:
@@ -112,8 +158,8 @@ class GatewayService:
         self.database.reset_demo_fixtures(run_id)
         self.business_db = self._initial_business_state()
         self.events[run_id] = []
-        self.credentials.pop(run_id, None)
-        self.revoked_credentials.pop(run_id, None)
+        with self.database._connect() as connection:
+            connection.execute("DELETE FROM agent_sessions WHERE run_id = ?", (run_id,))
         return self.get_demo_state(run_id)
 
     def get_demo_state(self, run_id: str) -> dict[str, Any]:
@@ -171,7 +217,11 @@ class GatewayService:
         return descendants
 
     def _known_tools(self) -> list[str]:
-        return ["read_orders", "process_order", "read_account", "modify_billing"]
+        return sorted(KNOWN_TOOLS | {"read_orders", "process_order"})
+
+    @staticmethod
+    def _hash_token(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def _dispatch_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool_name == "read_orders":

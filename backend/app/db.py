@@ -71,6 +71,20 @@ class AgentTreeDB:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    branch_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    FOREIGN KEY (run_id, agent_id) REFERENCES agents(run_id, agent_id),
+                    FOREIGN KEY (run_id, branch_id) REFERENCES branches(run_id, branch_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS business_accounts (
                     run_id TEXT NOT NULL,
                     customer_id TEXT NOT NULL,
@@ -194,7 +208,8 @@ class AgentTreeDB:
         stopped_at: Optional[str] = None,
     ) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()
-        branch_id = parent_agent_id or agent_id
+        parent = self.get_agent(run_id, parent_agent_id) if parent_agent_id else None
+        branch_id = agent_id if parent is None or parent.get("parent_agent_id") is None else parent["branch_id"]
         started_at = started_at or timestamp
         with self._connect() as connection:
             connection.execute(
@@ -229,6 +244,11 @@ class AgentTreeDB:
                     stopped_at,
                 ),
             )
+            if branch_id == agent_id:
+                connection.execute(
+                    "INSERT OR IGNORE INTO branches (run_id, branch_id, state) VALUES (?, ?, 'RUNNING')",
+                    (run_id, branch_id),
+                )
 
     def get_agent(self, run_id: str, agent_id: str):
         with self._connect() as connection:
