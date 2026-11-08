@@ -107,6 +107,9 @@ function App() {
   const state = dashboard?.business_state
   const committed = effects.filter((effect) => effect.state === 'COMMITTED').length
   const pending = effects.filter((effect) => effect.state === 'STAGED').length
+  const lastCommit = effects.filter((effect) => effect.state === 'COMMITTED').slice(-1)[0]
+  const recentEvents = events.slice(-8).reverse()
+  const runStatus = agents.length === 0 ? 'NOT STARTED' : agents.some((agent) => agent.status === 'RUNNING') ? 'ACTIVE' : agents.every((agent) => ['STOPPED', 'FAILED'].includes(agent.status)) ? 'STOPPED' : 'MONITORING'
 
   const handleStopBranch = async (agentId: string) => {
     setPendingAction(`stop:${agentId}`)
@@ -165,7 +168,7 @@ function App() {
     {error ? <div className="error-banner" role="alert">{error}</div> : null}
 
     <section className="summary-strip" aria-label="Run summary">
-      <div><span className="summary-label">RUN STATUS</span><strong><i className="live-dot" />{agents.some((a) => a.status === 'RUNNING') ? 'ACTIVE' : 'MONITORING'}</strong></div>
+      <div><span className="summary-label">RUN STATUS</span><strong>{runStatus === 'ACTIVE' && <i className="live-dot" />}{runStatus}</strong></div>
       <div><span className="summary-label">AGENTS</span><strong>{agents.length.toString().padStart(2, '0')} <small>in hierarchy</small></strong></div>
       <div><span className="summary-label">PENDING EFFECTS</span><strong>{pending.toString().padStart(2, '0')} <small>staged</small></strong></div>
       <div><span className="summary-label">COMMITTED</span><strong>{committed.toString().padStart(2, '0')} <small>effects</small></strong></div>
@@ -199,18 +202,19 @@ function App() {
     </main>
 
     <section className="panel transaction-panel">
-      <div className="panel-header"><div><p className="section-kicker">CONTROLLED BUSINESS STATE</p><h2>Transactional effects</h2></div><span className="truth-label">Source: persisted journal + database</span></div>
+      <div className="panel-header"><div><p className="section-kicker">CONTROLLED BUSINESS STATE</p><h2>Transactional effects</h2></div><span className="truth-label">Authoritative · persisted journal + database</span></div>
       <div className="business-grid"><div className="business-card"><div className="business-title"><span className="resource-icon">ORD</span><div><strong>Order {state?.order.order_id ?? 'ORD-882'}</strong><span>Refund balance</span></div></div><div className="money-row"><div><small>REFUNDED</small><strong>{money(state?.order.refunded_cents ?? 0)}</strong></div><div><small>PAID</small><strong>{money(state?.order.paid_cents ?? 0)}</strong></div><span className="status-chip">{state?.order.status ?? 'PENDING'}</span></div></div>
         <div className="business-card"><div className="business-title"><span className="resource-icon account">ACC</span><div><strong>Account {state?.account.customer_id ?? 'C104'}</strong><span>Promotional credit</span></div></div><div className="money-row"><div><small>COMMITTED CREDIT</small><strong>{money(state?.account.promo_credit_cents ?? 0)}</strong></div><div><small>VERSION</small><strong>{state?.account.version ?? 0}</strong></div><span className="status-chip">LIVE</span></div></div></div>
-      <div className="effects-table"><div className="effect-head"><span>EFFECT</span><span>BRANCH</span><span>AMOUNT</span><span>STATE</span><span>CREATED</span></div>{effects.length ? effects.map((effect) => <div className="effect-row" key={effect.action_id}><span><strong>{effect.tool.replaceAll('_', ' ')}</strong><small>{effect.action_id.slice(0, 12)}</small></span><span>{effect.branch_id}</span><span>{money(Number(effect.arguments.amount_cents ?? 0))}</span><span className={`effect-state ${effect.state.toLowerCase()}`}>{effect.state}</span><span>{shortTime(effect.created_at)}</span></div>) : <div className="empty-state effect-empty">No effects staged. Actions will appear here as the agents work.</div>}</div>
+      <div className="effects-table"><div className="effect-head"><span>EFFECT</span><span>BRANCH</span><span>AMOUNT</span><span>STATE</span><span>CREATED</span></div>{effects.length ? effects.map((effect) => <div className="effect-row" key={effect.action_id}><span><strong>{effect.tool.replaceAll('_', ' ')}</strong><small>{effect.action_id.slice(0, 12)}</small></span><span>{effect.branch_id}</span><span>{money(Number(effect.arguments.amount_cents ?? 0))}</span><span className={`effect-state ${effect.state.toLowerCase()}`}>{effect.state}</span><span>{shortTime(effect.created_at)}</span></div>) : <div className="empty-state effect-empty">No pending or resolved effects yet. Authorized state changes first appear as staged journal entries.</div>}</div>
+      {lastCommit && <div className="commit-receipt"><span className="receipt-check">✓</span><div><small>COMMIT RECEIPT · {lastCommit.action_id.slice(0, 12)}</small><strong>{lastCommit.tool.replaceAll('_', ' ')} · {money(Number(lastCommit.arguments.amount_cents ?? 0))}</strong><span>Branch {lastCommit.branch_id} · action staged {shortTime(lastCommit.created_at)} · committed state confirmed in journal</span></div><b>COMMITTED</b></div>}
     </section>
 
     <section className="bottom-grid">
       <div className="panel"><div className="panel-header"><div><p className="section-kicker">AUDIT TRAIL</p><h2>Authorization events</h2></div><span className="count-pill">{events.length} events</span></div>
-        <ul className="event-list">{events.length === 0 ? <li className="empty-state">No authorization events recorded yet.</li> : events.slice(0, 8).map((event, index) => <li key={event.event_seq ?? `${event.agent_id}-${index}`}><div className="event-row"><span className={`event-tag ${(event.decision ?? 'info').toLowerCase()}`}>{event.decision ?? event.type ?? 'INFO'}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.tool ?? 'runtime'}</span>{event.origin && <span className="origin-tag">{event.origin.replaceAll('_', ' ')}</span>}</div><p>{event.detail ?? event.reason_code ?? 'No additional detail'}</p><small>{shortTime(event.timestamp)}{event.event_seq ? ` · #${event.event_seq}` : ''}</small></li>)}</ul>
+        <ul className="event-list">{events.length === 0 ? <li className="empty-state">No authorization events recorded yet.</li> : recentEvents.map((event, index) => <li key={event.event_seq ?? `${event.agent_id}-${index}`}><div className="event-row"><span className={`event-tag ${(event.decision ?? 'info').toLowerCase()}`}>{event.decision ?? event.type ?? 'INFO'}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.tool ?? 'runtime'}</span>{event.origin && <span className="origin-tag">{event.origin.replaceAll('_', ' ')}</span>}</div><p>{event.detail ?? event.reason_code ?? 'No additional detail'}</p><small>{shortTime(event.timestamp)}{event.event_seq ? ` · #${event.event_seq}` : ''}</small></li>)}</ul>
       </div>
       <div className="panel"><div className="panel-header"><div><p className="section-kicker">RUNTIME FEED</p><h2>Recent activity</h2></div><span className="live-indicator"><i className="live-dot" />Persisted snapshot · 1.5s</span></div>
-        <ul className="activity-list">{events.length === 0 ? <li className="empty-state">Activity will appear as events are recorded.</li> : events.slice(0, 8).map((event, index) => <li key={`activity-${event.event_seq ?? index}`}><span className="time">{shortTime(event.timestamp)}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.type ?? event.decision ?? 'activity'}</span><em>{event.origin ?? ''}</em></li>)}</ul>
+        <ul className="activity-list">{events.length === 0 ? <li className="empty-state">Activity will appear as events are recorded.</li> : recentEvents.map((event, index) => <li key={`activity-${event.event_seq ?? index}`}><span className="time">{shortTime(event.timestamp)}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.type ?? event.decision ?? 'activity'}</span><em>{event.origin ?? ''}</em></li>)}</ul>
       </div>
     </section>
     <footer className="footer-note"><span>AGENTTREE TRANSACTIONAL HARNESS</span><span>{dashboard?.run_id ?? runId} · Refresh reconstructs state from backend records</span></footer>
