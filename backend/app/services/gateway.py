@@ -14,8 +14,9 @@ from backend.app.services.staging import StagingService
 
 
 class GatewayService:
-    def __init__(self, database):
+    def __init__(self, database, supervisor=None):
         self.database = database
+        self.supervisor = supervisor
         self.staging = StagingService(database)
         self.events: dict[str, list[dict[str, Any]]] = {}
         self.business_db = self._initial_business_state()
@@ -117,6 +118,7 @@ class GatewayService:
         policy = BRANCH_POLICIES.get(agent["role"])
         if policy is None or tool_name not in policy.allowed_tools or tool_name not in agent["allowed_tools"]:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
+            self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy)
             raise PermissionError("Permission denied")
 
         if not isinstance(arguments, dict):
@@ -127,6 +129,7 @@ class GatewayService:
             result = self._dispatch_tool(run_id, session[1], tool_name, arguments, origin)
         except PermissionError:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
+            self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy)
             raise
         except ValueError:
             self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_ARGUMENTS", origin)
@@ -139,24 +142,26 @@ class GatewayService:
             raise ValueError(f"Run '{run_id}' does not exist")
 
         branch_members = self._branch_members(run_id, branch_id)
-        timestamp = datetime.now(timezone.utc).isoformat()
-        placeholders = ",".join("?" for _ in branch_members)
-        branch_ids = list({self.database.get_agent(run_id, member)["branch_id"] for member in branch_members})
-        branch_placeholders = ",".join("?" for _ in branch_ids)
-        with self.database._connect() as connection:
-            connection.execute(
-                f"""UPDATE agent_sessions SET revoked_at = ?
-                    WHERE run_id = ? AND agent_id IN ({placeholders}) AND revoked_at IS NULL""",
-                (timestamp, run_id, *branch_members),
-            )
-            connection.execute(
-                f"""UPDATE branches SET state = ?, aborted_at = ?
-                    WHERE run_id = ? AND branch_id IN ({branch_placeholders})
-                    AND state NOT IN (?, ?)""",
-                (BranchState.ABORTED.value, timestamp, run_id, *branch_ids,
-                 BranchState.COMMITTED.value, BranchState.COMMITTING.value),
-            )
+        branch_ids = {self.database.get_agent(run_id, member)["branch_id"] for member in branch_members}
+        for member_branch_id in branch_ids:
+            self.staging.contain_branch(run_id, member_branch_id, "OPERATOR_STOP")
         return branch_members
+
+    def _contain_policy_violation(self, run_id, agent_id, branch_id, tool_name, policy):
+        if policy is None or not policy.abort_on_scope_violation:
+            return
+        result = self.staging.contain_branch(
+            run_id, branch_id, f"DISALLOWED_TOOL:{tool_name}", policy_violation=True
+        )
+        if result["state"] in {BranchState.COMMITTED.value, BranchState.COMMITTING.value}:
+            return
+        if self.supervisor is None:
+            return
+        for member_id in self._branch_members(run_id, branch_id):
+            try:
+                self.supervisor.stop_agent(run_id, member_id)
+            except ValueError:
+                pass
 
     def get_events(self, run_id: str) -> list[dict[str, Any]]:
         if not self.database.run_exists(run_id):

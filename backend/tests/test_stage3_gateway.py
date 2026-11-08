@@ -111,8 +111,9 @@ def test_account_agent_can_read_account_but_cannot_modify_billing(tmp_path):
         "read_account",
         {"customer_id": "C104"},
     )
-    assert follow_up.status_code == 200
-    assert follow_up.json()["result"]["balance"] == 100.0
+    # A configured scope violation contains the account branch and revokes
+    # its previous read capability as well as aborting pending effects.
+    assert follow_up.status_code == 403
 
 
 def test_missing_invalid_and_unknown_requests_are_rejected(tmp_path):

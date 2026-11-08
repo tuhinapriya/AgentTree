@@ -318,6 +318,68 @@ class StagingService:
         return {"run_id": run_id, "branch_id": branch_id,
                 "state": BranchState.ABORTED.value, "aborted_actions": action_ids}
 
+    def contain_branch(
+        self,
+        run_id: str,
+        branch_id: str,
+        reason: str,
+        policy_violation: bool = False,
+    ) -> dict[str, Any]:
+        """Revoke branch authority and abort pending actions in one DB transaction."""
+        self._require_run(run_id)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self.database._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            branch = connection.execute(
+                "SELECT state FROM branches WHERE run_id = ? AND branch_id = ?",
+                (run_id, branch_id),
+            ).fetchone()
+            if branch is None:
+                connection.rollback()
+                raise ValueError(f"Branch '{branch_id}' does not exist in run '{run_id}'")
+
+            connection.execute(
+                """UPDATE agent_sessions SET revoked_at = ?
+                   WHERE run_id = ? AND branch_id = ? AND revoked_at IS NULL""",
+                (timestamp, run_id, branch_id),
+            )
+            if branch[0] in {BranchState.COMMITTED.value, BranchState.COMMITTING.value}:
+                connection.commit()
+                return {"run_id": run_id, "branch_id": branch_id,
+                        "state": branch[0], "aborted_actions": []}
+            if branch[0] == BranchState.ABORTED.value:
+                connection.commit()
+                return {"run_id": run_id, "branch_id": branch_id,
+                        "state": BranchState.ABORTED.value, "aborted_actions": []}
+
+            connection.execute(
+                """UPDATE branches SET state = ?, violation_count = violation_count + ?
+                   WHERE run_id = ? AND branch_id = ?""",
+                (BranchState.ABORTING.value, int(policy_violation), run_id, branch_id),
+            )
+            action_rows = connection.execute(
+                """SELECT action_id FROM journal WHERE run_id = ? AND branch_id = ? AND state = ?""",
+                (run_id, branch_id, EffectState.STAGED.value),
+            ).fetchall()
+            action_ids = [row[0] for row in action_rows]
+            connection.execute(
+                """UPDATE journal SET state = ? WHERE run_id = ? AND branch_id = ? AND state = ?""",
+                (EffectState.ABORTED.value, run_id, branch_id, EffectState.STAGED.value),
+            )
+            connection.execute(
+                "UPDATE branches SET state = ?, aborted_at = ? WHERE run_id = ? AND branch_id = ?",
+                (BranchState.ABORTED.value, timestamp, run_id, branch_id),
+            )
+            self._append_event(
+                connection, run_id, branch_id, f"{branch_id}-agent",
+                EventOrigin.SUPERVISOR.value,
+                "POLICY_VIOLATION_CONTAINED" if policy_violation else "BRANCH_STOPPED",
+                {"reason": reason, "action_ids": action_ids}, timestamp,
+            )
+            connection.commit()
+        return {"run_id": run_id, "branch_id": branch_id,
+                "state": BranchState.ABORTED.value, "aborted_actions": action_ids}
+
     def _reject_conflict(self, connection, run_id, branch_id, actions, timestamp):
         action_ids = [action[0] for action in actions]
         connection.execute(

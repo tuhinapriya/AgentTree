@@ -30,7 +30,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
     database = AgentTreeDB(database_path)
     service = HierarchyService(database)
     supervisor = SupervisorService(database)
-    gateway = GatewayService(database)
+    gateway = GatewayService(database, supervisor)
     bedrock = BedrockService(database)
     observability = AWSObservabilityService(database)
     app = FastAPI(title="AgentTree")
