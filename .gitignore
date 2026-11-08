@@ -1,0 +1,22 @@
+# Python environments and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local runtime data
+/backend/agenttree.db
+*.log
+
+# Local credentials and environment configuration
+.env
+.env.*
+!.env.example
+
+# Frontend build output and local tooling
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+.DS_Store

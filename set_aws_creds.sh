@@ -45,12 +45,15 @@ export AWS_DEFAULT_REGION="$region"
 
 # Persist for all future terminal windows by writing to a dedicated file
 AWS_ENV_FILE="$HOME/.aws_workshop_env"
+# The file contains temporary credentials; restrict access to this user.
+umask 077
 cat > "$AWS_ENV_FILE" << EOF
 export AWS_ACCESS_KEY_ID="$key_id"
 export AWS_SECRET_ACCESS_KEY="$secret_key"
 export AWS_SESSION_TOKEN="$session_token"
 export AWS_DEFAULT_REGION="$region"
 EOF
+chmod 600 "$AWS_ENV_FILE"
 
 # Add a one-time source line to your shell profile so new terminals load it automatically
 if [[ "$SHELL" == */zsh ]]; then

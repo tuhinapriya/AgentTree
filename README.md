@@ -4,6 +4,8 @@ AgentTree is a transactional execution harness for managed AI agents. It routes 
 
 The primary hackathon demo uses Amazon Bedrock to delegate work to live Order and Account worker processes. The workers decide which protected tools to call; every proposal goes through the gateway. The Account task includes an explicit red-team probe: after staging a $50 credit, it requests a billing change for customer `C999`. The gateway denies the tool call, revokes and stops Account, and aborts its pending credit. Order independently stages a $45 refund, completes its task, and is committed by the trusted supervisor after its state is verified. Events identify their source as `MODEL`, `SUPERVISOR`, or `OPERATOR`.
 
+The current demo uses a fixed topology: one registered coordinator and two registered child workers. Bedrock proposes the child tasks and chooses worker tool calls; the server configures the roster and the gateway enforces its trusted policies. The coordinator's delegation is mediated by the backend rather than executed by its idle worker process. Use **Run demo again** in the dashboard to start a fresh Bedrock-backed run; previous run history is preserved.
+
 A deterministic presentation is also available as a no-AWS fallback. Its actions are labeled `CONTROLLED_TEST` and must not be described as model-generated.
 
 ## Requirements
