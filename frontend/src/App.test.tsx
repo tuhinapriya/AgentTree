@@ -8,6 +8,15 @@ const mockDashboard = {
   run_id: 'run-demo-verify',
   hierarchy: {
     run_id: 'run-demo-verify',
+    tree: [
+      {
+        agent_id: 'parent-agent', role: 'parent', status: 'RUNNING', parent_agent_id: null,
+        children: [
+          { agent_id: 'order-agent', role: 'order', status: 'READY', parent_agent_id: 'parent-agent', children: [] },
+          { agent_id: 'account-agent', role: 'account', status: 'BLOCKED', parent_agent_id: 'parent-agent', children: [] },
+        ],
+      },
+    ],
     nodes: [
       {
         agent_id: 'parent-agent',
@@ -91,19 +100,19 @@ test('loads the transactional demo run by default', async () => {
   )
 })
 
-test('renders dashboard panels and agent list', async () => {
+test('renders the tree, database result, and timeline', async () => {
   render(<App />)
 
-  expect(await screen.findByRole('heading', { name: /execution control/i })).toBeInTheDocument()
-  expect(screen.getByText(/agent hierarchy/i)).toBeInTheDocument()
-  expect(screen.getByText(/authorization events/i)).toBeInTheDocument()
-  expect(screen.getAllByText(/parent-agent/i).length).toBeGreaterThan(0)
+  expect(await screen.findByRole('heading', { name: /customer transaction demo/i })).toBeInTheDocument()
+  expect(screen.getByText(/3 registered · 1 parent · 2 child agents/i)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: /final database state/i })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: /timeline/i })).toBeInTheDocument()
 })
 
 test('shows the agent tree and removes redundant operator controls', async () => {
   render(<App />)
 
-  await screen.findAllByText(/parent-agent/i)
-  expect(screen.getByText(/live · updates automatically/i)).toBeInTheDocument()
+  await screen.findByRole('heading', { name: /customer transaction demo/i })
+  expect(screen.getByText(/how this demo is configured/i)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /refresh|reset demo|contain branch/i })).not.toBeInTheDocument()
 })
