@@ -108,7 +108,7 @@ class SupervisorService:
                 if self._process_alive(pid):
                     proc.terminate()
                     proc.wait(timeout=5)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
                 pass
 
         if pid is not None:
@@ -117,7 +117,7 @@ class SupervisorService:
                 if self._process_alive(pid):
                     proc.kill()
                     proc.wait(timeout=5)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
                 pass
 
         if pid is not None and self._process_alive(pid):
