@@ -1,5 +1,4 @@
 import { render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
 
@@ -14,18 +13,21 @@ const mockDashboard = {
         agent_id: 'parent-agent',
         role: 'parent',
         status: 'RUNNING',
+        parent_agent_id: null,
         allowed_tools: ['read_orders', 'process_order'],
       },
       {
         agent_id: 'order-agent',
         role: 'order',
         status: 'READY',
+        parent_agent_id: 'parent-agent',
         allowed_tools: ['read_orders', 'process_order'],
       },
       {
         agent_id: 'account-agent',
         role: 'account',
         status: 'BLOCKED',
+        parent_agent_id: 'parent-agent',
         allowed_tools: ['read_account'],
       },
     ],
@@ -98,36 +100,10 @@ test('renders dashboard panels and agent list', async () => {
   expect(screen.getAllByText(/parent-agent/i).length).toBeGreaterThan(0)
 })
 
-test('stop branch trigger calls the branch stop endpoint', async () => {
-  const user = userEvent.setup()
+test('shows the agent tree and removes redundant operator controls', async () => {
   render(<App />)
 
   await screen.findAllByText(/parent-agent/i)
-  await user.click(screen.getByRole('button', { name: /^Contain branch$/i }))
-
-  expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/agenttree-live-demo/branches/parent-agent/stop'),
-    expect.objectContaining({ method: 'POST' }),
-  )
-})
-
-test('typing a run id does not auto-fetch until refresh is clicked', async () => {
-  const user = userEvent.setup()
-  render(<App />)
-
-  await screen.findAllByText(/parent-agent/i)
-  const initialCallCount = fetchMock.mock.calls.length
-
-  const input = screen.getByLabelText(/run id/i)
-  await user.clear(input)
-  await user.type(input, 'run-demo-2')
-
-  expect(fetchMock.mock.calls.length).toBe(initialCallCount)
-
-  await user.click(screen.getByRole('button', { name: /^Refresh$/i }))
-
-  expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/run-demo-2/dashboard'),
-    expect.any(Object),
-  )
+  expect(screen.getByText(/live · updates automatically/i)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /refresh|reset demo|contain branch/i })).not.toBeInTheDocument()
 })
