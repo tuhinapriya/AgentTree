@@ -1,11 +1,14 @@
+import time
+
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from backend.app.db import AgentTreeDB
 from backend.app.main import build_app
 from backend.app.services.gateway import GatewayService
-from backend.app.services.gateway import GatewayService
 from backend.app.services.bedrock import BedrockService
+from backend.app.services.hierarchy import HierarchyService
+from backend.app.services.supervisor import SupervisorService
 
 
 def _create_agents(client, run_id):
@@ -152,6 +155,54 @@ def test_policy_violation_aborts_pending_effect_and_stops_only_target_branch(tmp
     account_agent = AgentTreeDB(database_path).get_agent(run_id, "account-agent")
     assert "modify_billing" not in account_agent["allowed_tools"]
     client.post(f"/runs/{run_id}/cleanup")
+
+
+def test_model_origin_violation_returns_before_stopping_its_waiting_worker(tmp_path):
+    database = AgentTreeDB(str(tmp_path / "model-containment.db"))
+    hierarchy = HierarchyService(database)
+    hierarchy.create_run("model-containment")
+    hierarchy.create_agent("model-containment", "parent-agent", "parent", None, [])
+    hierarchy.create_agent("model-containment", "order-agent", "order", "parent-agent", ["read_order", "stage_refund"])
+    hierarchy.create_agent("model-containment", "account-agent", "account", "parent-agent", ["read_account", "stage_promo_credit"])
+    supervisor = SupervisorService(database)
+    gateway = GatewayService(database, supervisor)
+    supervisor.gateway = gateway
+    supervisor.launch("model-containment", ["parent-agent", "order-agent", "account-agent"])
+    credential = gateway.issue_credential("model-containment", "account-agent", origin="MODEL")["credential"]
+
+    try:
+        gateway.execute(
+            "model-containment", "account-agent", credential, "stage_promo_credit",
+            {"customer_id": "C104", "amount_cents": 5000},
+        )
+        try:
+            gateway.execute(
+                "model-containment", "account-agent", credential, "modify_billing",
+                {"customer_id": "C999", "amount": 50},
+            )
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("the model-proposed billing mutation must be denied")
+
+        assert database.get_agent("model-containment", "account-agent")["status"] in {"STOPPING", "STOPPED"}
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            account = database.get_agent("model-containment", "account-agent")
+            if account["status"] == "STOPPED":
+                break
+            time.sleep(0.05)
+        assert account["status"] == "STOPPED"
+        assert account["exit_code"] == 0
+        assert database.get_agent("model-containment", "order-agent")["status"] == "RUNNING"
+        assert any(
+            event["tool"] == "modify_billing"
+            and event["decision"] == "DENY"
+            and event["origin"] == "MODEL"
+            for event in gateway.get_events("model-containment")
+        )
+    finally:
+        supervisor.cleanup_run("model-containment")
 
 
 def test_scope_and_amount_policy_denials_do_not_stage_effects(tmp_path):

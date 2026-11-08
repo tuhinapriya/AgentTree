@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -133,6 +134,23 @@ class SupervisorService:
         )
         self.processes.get(run_id, {}).pop(agent_id, None)
         return {"run_id": run_id, "agent_id": agent_id, "status": "STOPPED", "pid": pid}
+
+    def request_stop_agent(self, run_id: str, agent_id: str) -> dict[str, Any]:
+        """Begin verified stop asynchronously for a worker making its own denied call."""
+        agent = self.database.get_agent(run_id, agent_id)
+        if agent is None:
+            raise ValueError(f"Agent '{agent_id}' does not exist in run '{run_id}'")
+        if agent["status"] in {"STOPPED", "FAILED"}:
+            return {"run_id": run_id, "agent_id": agent_id, "status": agent["status"]}
+        self.database.update_agent_state(run_id, agent_id, status="STOPPING")
+        thread = threading.Thread(
+            target=self.stop_agent,
+            args=(run_id, agent_id),
+            name=f"agenttree-stop-{run_id}-{agent_id}",
+            daemon=True,
+        )
+        thread.start()
+        return {"run_id": run_id, "agent_id": agent_id, "status": "STOPPING", "pid": agent.get("pid")}
 
     def verify_worker_completion(self, run_id: str, agent_id: str) -> dict[str, Any]:
         """Accept completion only from an authenticated, live managed worker."""

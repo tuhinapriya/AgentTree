@@ -83,6 +83,12 @@ def _run_agent_task(base_url, run_id, agent_id, role, task, credential):
                 },
                 timeout=10,
             )
+            if response.status_code == 403:
+                agent_state = requests.get(
+                    f"{base_url}/runs/{run_id}/agents/{agent_id}", timeout=10
+                )
+                if agent_state.ok and agent_state.json().get("status") in {"STOPPING", "STOPPED", "FAILED"}:
+                    return
             if response.ok:
                 content = [{"json": response.json()}]
                 status = "success"

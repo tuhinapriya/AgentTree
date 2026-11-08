@@ -151,7 +151,7 @@ class GatewayService:
         policy = BRANCH_POLICIES.get(agent["role"])
         if policy is None or tool_name not in policy.allowed_tools or tool_name not in agent["allowed_tools"]:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
-            self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy)
+            self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy, origin)
             raise PermissionError("Permission denied")
 
         if not isinstance(arguments, dict):
@@ -162,7 +162,7 @@ class GatewayService:
             result = self._dispatch_tool(run_id, session[1], tool_name, arguments, origin, idempotency_key)
         except PermissionError:
             self.record_event(run_id, agent_id, tool_name, "DENY", "TOOL_NOT_DELEGATED", origin)
-            self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy)
+            self._contain_policy_violation(run_id, agent_id, session[1], tool_name, policy, origin)
             raise
         except ValueError:
             self.record_event(run_id, agent_id, tool_name, "DENY", "INVALID_ARGUMENTS", origin)
@@ -180,7 +180,7 @@ class GatewayService:
             self.staging.contain_branch(run_id, member_branch_id, "OPERATOR_STOP")
         return branch_members
 
-    def _contain_policy_violation(self, run_id, agent_id, branch_id, tool_name, policy):
+    def _contain_policy_violation(self, run_id, agent_id, branch_id, tool_name, policy, origin):
         if policy is None or not policy.abort_on_scope_violation:
             return
         result = self.staging.contain_branch(
@@ -192,7 +192,12 @@ class GatewayService:
             return
         for member_id in self._branch_members(run_id, branch_id):
             try:
-                self.supervisor.stop_agent(run_id, member_id)
+                if origin == EventOrigin.MODEL.value:
+                    # The worker is waiting for this gateway response. Return
+                    # the DENY first, then reap the worker asynchronously.
+                    self.supervisor.request_stop_agent(run_id, member_id)
+                else:
+                    self.supervisor.stop_agent(run_id, member_id)
             except ValueError:
                 pass
 
