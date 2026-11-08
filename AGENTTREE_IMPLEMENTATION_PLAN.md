@@ -614,6 +614,7 @@ This roadmap is the execution checklist for the current repository. Each numbere
 - Backend suite: `44 passed` (`pytest -q backend/tests`). Includes stage/overlay, commit retry, abort-before-commit, credential replay, scope containment, sibling continuation, process crash detection, cleanup, and reset/replay.
 - Frontend: `4 passed` (`npm test`); production TypeScript/Vite build passes (`npm run build`).
 - Three consecutive local CLI rehearsals from the same stable run ID each showed Order `$45` `STAGED → COMMITTED`, Account `$50` `STAGED → ABORTED`, committed promo credit `$0`, Account process `STOPPED` with exit code `0`, and Order still `RUNNING`. Remaining workers were then cleaned up.
-- Amazon Bedrock Converse and a model-proposed tool-use request were smoke-tested separately. The three full presentation rehearsals intentionally use `CONTROLLED_TEST`; they do not claim the model generated the unauthorized request.
+- A live CLI-launched Bedrock worker smoke completed an Order task: Converse → model-proposed `read_order` → gateway `ALLOW` → authenticated worker completion. The audit trail marked the model calls and tool call `MODEL`; workers were cleaned up afterward.
+- The three full transactional presentation rehearsals intentionally use `CONTROLLED_TEST`; they do not claim the model generated the unauthorized request. A full Bedrock-driven staged transaction through commit was not part of the rehearsals.
 
 **Scope boundary:** a full Bedrock-driven worker run through commit was not part of the three clean presentation rehearsals. External API side effects remain outside SQLite atomic commit, and AgentTree is not an operating-system sandbox. Setup, commands, AWS prerequisites, and these limits are documented in the repository `README.md`.
