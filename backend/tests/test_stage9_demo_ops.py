@@ -186,3 +186,13 @@ def test_demo_reset_rearms_branches_and_clears_pending_data(tmp_path):
               "arguments": {"customer_id": "C104"}},
     )
     assert stale_credential.status_code == 401
+
+    # Reset must restore the root branch too, so the same hierarchy can launch
+    # again without recreating agents or manually editing persistent state.
+    replay = client.post(
+        f"/runs/{run_id}/supervise",
+        json={"agent_ids": ["parent-agent", "order-agent", "account-agent"]},
+    )
+    assert replay.status_code == 200
+    assert all(worker["status"] == "RUNNING" for worker in replay.json()["started"])
+    assert client.post(f"/runs/{run_id}/cleanup").status_code == 200

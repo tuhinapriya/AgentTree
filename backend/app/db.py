@@ -177,8 +177,10 @@ class AgentTreeDB:
             )
             connection.execute(
                 """INSERT OR IGNORE INTO branches (run_id, branch_id, state)
-                   VALUES (?, 'order-agent', 'RUNNING'), (?, 'account-agent', 'RUNNING')""",
-                (run_id, run_id),
+                   VALUES (?, 'parent-agent', 'RUNNING'),
+                          (?, 'order-agent', 'RUNNING'),
+                          (?, 'account-agent', 'RUNNING')""",
+                (run_id, run_id, run_id),
             )
 
     def reset_demo_fixtures(self, run_id: str) -> None:
