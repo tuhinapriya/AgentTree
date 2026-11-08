@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
@@ -186,6 +187,23 @@ def test_demo_reset_rearms_branches_and_clears_pending_data(tmp_path):
               "arguments": {"customer_id": "C104"}},
     )
     assert stale_credential.status_code == 401
+
+    # Simulate the legacy run shape that grouped both children under the root.
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE agents SET branch_id = 'parent-agent' WHERE run_id = ? AND agent_id != 'parent-agent'",
+            (run_id,),
+        )
+    assert client.post(f"/runs/{run_id}/demo/reset").status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        assignments = dict(connection.execute(
+            "SELECT agent_id, branch_id FROM agents WHERE run_id = ?", (run_id,)
+        ))
+    assert assignments == {
+        "parent-agent": "parent-agent",
+        "order-agent": "order-agent",
+        "account-agent": "account-agent",
+    }
 
     # Reset must restore the root branch too, so the same hierarchy can launch
     # again without recreating agents or manually editing persistent state.

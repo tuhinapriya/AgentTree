@@ -191,6 +191,44 @@ class AgentTreeDB:
             connection.execute("DELETE FROM branches WHERE run_id = ?", (run_id,))
             connection.execute("DELETE FROM business_orders WHERE run_id = ?", (run_id,))
             connection.execute("DELETE FROM business_accounts WHERE run_id = ?", (run_id,))
+
+            # Older demo runs assigned every child to the root branch. Rebuild
+            # branch ownership from the saved hierarchy before rearming its
+            # transactional state, so reset/replay uses today's isolation rules.
+            rows = connection.execute(
+                "SELECT agent_id, parent_agent_id FROM agents WHERE run_id = ? ORDER BY started_at, agent_id",
+                (run_id,),
+            ).fetchall()
+            parent_by_agent = {row[0]: row[1] for row in rows}
+            branch_by_agent: dict[str, str] = {}
+            pending = list(rows)
+            while pending:
+                progressed = False
+                for row in pending[:]:
+                    agent_id, parent_agent_id = row[0], row[1]
+                    if parent_agent_id is None:
+                        branch_by_agent[agent_id] = agent_id
+                    elif parent_agent_id in branch_by_agent:
+                        branch_by_agent[agent_id] = (
+                            agent_id if parent_by_agent[parent_agent_id] is None
+                            else branch_by_agent[parent_agent_id]
+                        )
+                    else:
+                        continue
+                    connection.execute(
+                        "UPDATE agents SET branch_id = ? WHERE run_id = ? AND agent_id = ?",
+                        (branch_by_agent[agent_id], run_id, agent_id),
+                    )
+                    pending.remove(row)
+                    progressed = True
+                if not progressed:
+                    raise ValueError("Cannot reset demo with an invalid agent hierarchy")
+
+            for branch_id in sorted(set(branch_by_agent.values())):
+                connection.execute(
+                    "INSERT INTO branches (run_id, branch_id, state) VALUES (?, ?, 'RUNNING')",
+                    (run_id, branch_id),
+                )
         self.create_demo_fixtures(run_id)
 
     def create_run(self, run_id: str, scenario: str) -> None:
