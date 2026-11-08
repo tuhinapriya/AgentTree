@@ -24,7 +24,9 @@ def _create_run_and_agents(client: TestClient, run_id: str):
         assert agent_response.status_code == 200
 
 
-def test_aws_status_reports_local_fallback_when_sdk_is_unavailable(tmp_path):
+def test_aws_status_reports_local_fallback_when_sdk_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
     app = build_app(str(tmp_path / "stage8-status.db"))
     client = TestClient(app)
 
