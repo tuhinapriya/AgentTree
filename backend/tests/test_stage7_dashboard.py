@@ -82,3 +82,14 @@ def test_dashboard_allows_local_frontend_origin(tmp_path):
 
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") in {"http://localhost:5174", "*"}
+
+    preflight = client.options(
+        "/runs/run-stage7-cors/dashboard",
+        headers={
+            "Origin": "http://127.0.0.1:5176",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers.get("access-control-allow-origin") == "http://127.0.0.1:5176"
