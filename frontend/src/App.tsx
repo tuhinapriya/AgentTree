@@ -11,17 +11,22 @@ type AgentNode = {
   branch_id?: string
   pid?: number | null
   exit_code?: number | null
+  process_create_time?: string | null
+  stopped_at?: string | null
+  children?: AgentNode[]
 }
 type EventEntry = {
   event_seq?: number
   timestamp?: string
   agent_id?: string
+  branch_id?: string | null
   tool?: string
   type?: string
   decision?: string
   reason_code?: string
   detail?: string
   origin?: string
+  payload?: Record<string, unknown>
 }
 type Effect = {
   action_id: string
@@ -32,13 +37,15 @@ type Effect = {
   created_at: string
 }
 type Branch = { branch_id: string; state: string; violation_count: number }
+type TimelineItem = { at: string; title: string; detail: string; state: string; agent?: string }
 type BusinessState = {
   account: { customer_id: string; promo_credit_cents: number; version: number }
   order: { order_id: string; paid_cents: number; refunded_cents: number; version: number; status: string }
 }
 type DashboardPayload = {
   run_id: string
-  hierarchy: { run_id: string; nodes?: AgentNode[]; agents?: AgentNode[]; edges?: Array<{ source: string; target: string }> }
+  run?: { run_id: string; scenario: string; status: string; created_at: string }
+  hierarchy: { run_id: string; tree?: AgentNode[]; nodes?: AgentNode[]; agents?: AgentNode[]; edges?: Array<{ source: string; target: string }> }
   events: EventEntry[]
   effects?: { effects: Effect[]; branches: Branch[] }
   business_state?: BusinessState
@@ -53,6 +60,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 const DEMO_RUN_FALLBACKS = ['agenttree-live-demo', 'agenttree-transactional-demo', 'run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 const shortTime = (value?: string) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
+const fullTime = (value?: string) => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : 'Time unavailable'
 
 function App() {
   const [runId, setRunId] = useState(DEMO_RUN_FALLBACKS[0])
@@ -100,6 +108,7 @@ function App() {
   }, [])
 
   const agents = dashboard?.hierarchy.nodes ?? dashboard?.hierarchy.agents ?? []
+  const roots = dashboard?.hierarchy.tree ?? agents.filter((agent) => !agent.parent_agent_id)
   const selectedAgent = useMemo(() => agents.find((agent) => agent.agent_id === selectedAgentId) ?? agents[0] ?? null, [agents, selectedAgentId])
   const events = dashboard?.events ?? []
   const effects = dashboard?.effects?.effects ?? []
@@ -109,7 +118,28 @@ function App() {
   const pending = effects.filter((effect) => effect.state === 'STAGED').length
   const lastCommit = effects.filter((effect) => effect.state === 'COMMITTED').slice(-1)[0]
   const recentEvents = events.slice(-8).reverse()
-  const runStatus = agents.length === 0 ? 'NOT STARTED' : agents.some((agent) => agent.status === 'RUNNING') ? 'ACTIVE' : agents.every((agent) => ['STOPPED', 'FAILED'].includes(agent.status)) ? 'STOPPED' : 'MONITORING'
+  const runStatus = dashboard?.run?.status ?? (agents.length === 0 ? 'NOT STARTED' : agents.some((agent) => agent.status === 'RUNNING') ? 'RUNNING' : agents.every((agent) => ['STOPPED', 'FAILED'].includes(agent.status)) ? 'STOPPED' : 'MONITORING')
+  const timeline = useMemo(() => {
+    const items: TimelineItem[] = []
+    if (dashboard?.run?.created_at) items.push({ at: dashboard.run.created_at, title: 'Run created', detail: dashboard.run.scenario, state: 'info' })
+    for (const agent of agents) {
+      if (agent.process_create_time) items.push({ at: agent.process_create_time, title: 'Agent process started', detail: `PID ${agent.pid ?? 'unknown'}`, state: 'info', agent: agent.agent_id })
+      if (agent.stopped_at) items.push({ at: agent.stopped_at, title: agent.status === 'FAILED' ? 'Agent process failed' : 'Agent process stopped', detail: `Exit code ${agent.exit_code ?? 'unknown'}`, state: agent.status.toLowerCase(), agent: agent.agent_id })
+    }
+    for (const event of events) {
+      if (!event.timestamp) continue
+      const actor = event.branch_id ?? event.agent_id
+      if (event.type === 'TOOL_STAGED') items.push({ at: event.timestamp, title: 'Effect staged', detail: `${event.tool ?? 'Action'}${Number(event.payload?.amount_cents) ? ` · ${money(Number(event.payload?.amount_cents))}` : ''}`, state: 'staged', agent: actor })
+      else if (event.decision === 'DENY') items.push({ at: event.timestamp, title: 'Action denied', detail: `${event.tool ?? 'Tool'} · ${event.reason_code ?? 'Policy violation'}`, state: 'failed', agent: actor })
+      else if (event.type === 'POLICY_VIOLATION_CONTAINED' || event.type === 'BRANCH_ABORTED') items.push({ at: event.timestamp, title: 'Branch aborted', detail: event.detail ?? String(event.payload?.reason ?? 'Pending work discarded'), state: 'failed', agent: actor })
+      else if (event.type === 'COMMIT_ELIGIBLE') items.push({ at: event.timestamp, title: 'Branch ready to commit', detail: 'Completion rules satisfied', state: 'ready', agent: actor })
+      else if (event.type === 'BRANCH_COMMITTED') items.push({ at: event.timestamp, title: 'Branch committed', detail: `${Array.isArray(event.payload?.action_ids) ? event.payload.action_ids.length : 0} staged effect(s) applied`, state: 'committed', agent: actor })
+      else if (event.tool === 'bedrock.delegate') items.push({ at: event.timestamp, title: 'Delegation started', detail: 'Parent assigned work to child agents', state: 'info', agent: event.agent_id })
+      else if (event.tool === 'worker.complete') items.push({ at: event.timestamp, title: 'Agent task completed', detail: 'Worker reported successful completion', state: 'committed', agent: event.agent_id })
+    }
+    for (const effect of effects) if (effect.state === 'ABORTED' && !events.some((event) => event.type === 'POLICY_VIOLATION_CONTAINED' && event.branch_id === effect.branch_id)) items.push({ at: effect.created_at, title: 'Staged effect aborted', detail: effect.tool.replaceAll('_', ' '), state: 'failed', agent: effect.branch_id })
+    return items.sort((a, b) => a.at.localeCompare(b.at))
+  }, [agents, dashboard?.run, events, effects])
 
   const handleStopBranch = async (agentId: string) => {
     setPendingAction(`stop:${agentId}`)
@@ -155,6 +185,17 @@ function App() {
     finally { setPendingAction(null) }
   }
 
+  const renderTreeNode = (agent: AgentNode) => {
+    const branch = branches.find((item) => item.branch_id === (agent.branch_id ?? agent.agent_id))
+    return <div className="tree-branch" key={agent.agent_id}>
+      <button type="button" className={`tree-node ${selectedAgent?.agent_id === agent.agent_id ? 'active' : ''}`} onClick={() => setSelectedAgentId(agent.agent_id)}>
+        <span className="node-icon">{agent.role.slice(0, 1).toUpperCase()}</span><span className="node-copy"><span className="node-role">{agent.role}</span><span className="node-id">{agent.agent_id}</span></span>
+        <span className="node-meta">{branch?.state ?? agent.task_state ?? ''}</span><span className={`node-status ${agent.status.toLowerCase()}`}>{agent.status}</span>
+      </button>
+      {agent.children?.length ? <div className="tree-children">{agent.children.map(renderTreeNode)}</div> : null}
+    </div>
+  }
+
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand-lockup"><div className="brand-mark">A</div><div><p className="eyebrow">AgentTree / Runtime security</p><h1>Execution Control</h1></div></div>
@@ -168,7 +209,7 @@ function App() {
     {error ? <div className="error-banner" role="alert">{error}</div> : null}
 
     <section className="summary-strip" aria-label="Run summary">
-      <div><span className="summary-label">RUN STATUS</span><strong>{runStatus === 'ACTIVE' && <i className="live-dot" />}{runStatus}</strong></div>
+      <div><span className="summary-label">RUN STATUS</span><strong>{runStatus === 'RUNNING' && <i className="live-dot" />}{runStatus}</strong></div>
       <div><span className="summary-label">AGENTS</span><strong>{agents.length.toString().padStart(2, '0')} <small>in hierarchy</small></strong></div>
       <div><span className="summary-label">PENDING EFFECTS</span><strong>{pending.toString().padStart(2, '0')} <small>staged</small></strong></div>
       <div><span className="summary-label">COMMITTED</span><strong>{committed.toString().padStart(2, '0')} <small>effects</small></strong></div>
@@ -178,13 +219,8 @@ function App() {
     <main className="content-grid">
       <section className="panel hierarchy-panel">
         <div className="panel-header"><div><p className="section-kicker">TOPOLOGY</p><h2>Agent hierarchy</h2></div><span className="count-pill">{agents.length} agents</span></div>
-        <div className="tree-list">{agents.length === 0 ? <p className="empty-state">No agents available for this run yet.</p> : agents.map((agent) => {
-          const branch = branches.find((item) => item.branch_id === (agent.branch_id ?? agent.agent_id))
-          return <button key={agent.agent_id} type="button" className={`tree-node ${selectedAgent?.agent_id === agent.agent_id ? 'active' : ''}`} onClick={() => setSelectedAgentId(agent.agent_id)}>
-            <span className="node-icon">{agent.role.slice(0, 1).toUpperCase()}</span><span className="node-copy"><span className="node-role">{agent.role}</span><span className="node-id">{agent.agent_id}</span></span>
-            <span className="node-meta">{branch?.state ?? agent.task_state ?? ''}</span><span className={`node-status ${agent.status.toLowerCase()}`}>{agent.status}</span>
-          </button>
-        })}</div>
+        <p className="tree-explainer">RUNNING / STOPPED describe the worker process. Task completion and staged business outcomes are tracked separately.</p>
+        <div className="tree-list">{agents.length === 0 ? <p className="empty-state">No agents available for this run yet.</p> : roots.map(renderTreeNode)}</div>
         <div className="panel-subhead"><span>BRANCH CONTROL</span><span>Persistent state</span></div>
         <div className="branch-list">{branches.length ? branches.map((branch) => <div className="branch-row" key={branch.branch_id}><span>{branch.branch_id}</span><strong className={`state-${branch.state.toLowerCase()}`}>{branch.state.replaceAll('_', ' ')}</strong>{branch.violation_count > 0 && <small>{branch.violation_count} violation{branch.violation_count > 1 ? 's' : ''}</small>}</div>) : <p className="empty-state compact">Branch state appears when agents are registered.</p>}</div>
       </section>
@@ -193,7 +229,7 @@ function App() {
         <div className="panel-header"><div><p className="section-kicker">IDENTITY & SCOPE</p><h2>Agent details</h2></div>{selectedAgent && <span className="count-pill">{selectedAgent.role}</span>}</div>
         {selectedAgent ? <>
           <div className="identity-card"><span className="identity-icon">{selectedAgent.role.slice(0, 1).toUpperCase()}</span><div><strong>{selectedAgent.agent_id}</strong><span>{selectedAgent.parent_agent_id ? `Reports to ${selectedAgent.parent_agent_id}` : 'Root coordinator'}</span></div></div>
-          <div className="detail-grid"><div className="detail-block"><p className="label">PROCESS</p><strong>{selectedAgent.pid ? `PID ${selectedAgent.pid}` : '—'}</strong></div><div className="detail-block"><p className="label">EXIT CODE</p><strong>{selectedAgent.exit_code ?? '—'}</strong></div><div className="detail-block"><p className="label">TASK STATE</p><strong>{(selectedAgent.task_state ?? '—').replaceAll('_', ' ')}</strong></div><div className="detail-block"><p className="label">STATUS</p><strong>{selectedAgent.status}</strong></div></div>
+          <div className="detail-grid"><div className="detail-block"><p className="label">PROCESS</p><strong>{selectedAgent.pid ? `PID ${selectedAgent.pid}` : '—'}</strong></div><div className="detail-block"><p className="label">EXIT CODE</p><strong>{selectedAgent.exit_code ?? '—'}</strong></div><div className="detail-block"><p className="label">TASK STATE</p><strong>{(selectedAgent.task_state ?? '—').replaceAll('_', ' ')}</strong></div><div className="detail-block"><p className="label">PROCESS STATUS</p><strong>{selectedAgent.status}</strong></div></div>
           <div className="detail-block"><p className="label">AUTHORIZED TOOLS</p><div className="tool-tags">{(selectedAgent.allowed_tools ?? []).map((tool) => <span key={tool}>{tool}</span>)}</div></div>
           <div className="action-stack"><button type="button" onClick={() => void handleStopBranch(selectedAgent.agent_id)} disabled={pendingAction !== null || ['STOPPED', 'FAILED'].includes(selectedAgent.status)}>{pendingAction === `stop:${selectedAgent.agent_id}` ? 'Containing…' : 'Contain branch'}</button><button type="button" className="secondary" onClick={() => void handleResetDemo()} disabled={pendingAction !== null}>{pendingAction === 'reset' ? 'Resetting…' : 'Reset run'}</button></div>
           {effects.some((effect) => effect.branch_id === selectedAgent.agent_id && effect.state === 'STAGED') && <button type="button" className="release-button" onClick={() => void handleReleaseBranch(selectedAgent.agent_id)} disabled={pendingAction !== null || selectedAgent.status !== 'RUNNING'}>{pendingAction === `release:${selectedAgent.agent_id}` ? 'Committing…' : 'Mark complete & commit staged work'}</button>}
@@ -213,8 +249,9 @@ function App() {
       <div className="panel"><div className="panel-header"><div><p className="section-kicker">AUDIT TRAIL</p><h2>Authorization events</h2></div><span className="count-pill">{events.length} events</span></div>
         <ul className="event-list">{events.length === 0 ? <li className="empty-state">No authorization events recorded yet.</li> : recentEvents.map((event, index) => <li key={event.event_seq ?? `${event.agent_id}-${index}`}><div className="event-row"><span className={`event-tag ${(event.decision ?? 'info').toLowerCase()}`}>{event.decision ?? event.type ?? 'INFO'}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.tool ?? 'runtime'}</span>{event.origin && <span className="origin-tag">{event.origin.replaceAll('_', ' ')}</span>}</div><p>{event.detail ?? event.reason_code ?? 'No additional detail'}</p><small>{shortTime(event.timestamp)}{event.event_seq ? ` · #${event.event_seq}` : ''}</small></li>)}</ul>
       </div>
-      <div className="panel"><div className="panel-header"><div><p className="section-kicker">RUNTIME FEED</p><h2>Recent activity</h2></div><span className="live-indicator"><i className="live-dot" />Persisted snapshot · 1.5s</span></div>
-        <ul className="activity-list">{events.length === 0 ? <li className="empty-state">Activity will appear as events are recorded.</li> : recentEvents.map((event, index) => <li key={`activity-${event.event_seq ?? index}`}><span className="time">{shortTime(event.timestamp)}</span><strong>{event.agent_id ?? 'system'}</strong><span>{event.type ?? event.decision ?? 'activity'}</span><em>{event.origin ?? ''}</em></li>)}</ul>
+      <div className="panel"><div className="panel-header"><div><p className="section-kicker">RUN HISTORY</p><h2>Run timeline</h2></div><span className="count-pill">{timeline.length} milestones</span></div>
+        {dashboard?.run && <div className="run-context"><strong>{dashboard.run.run_id}</strong><span>{dashboard.run.scenario} · created {fullTime(dashboard.run.created_at)} · run {dashboard.run.status.toLowerCase()}</span></div>}
+        <ol className="run-timeline">{timeline.length === 0 ? <li className="empty-state">Milestones appear here as the run progresses.</li> : timeline.map((item, index) => <li key={`${item.at}-${item.title}-${index}`} className={`timeline-${item.state}`}><span className="timeline-marker"/><time>{fullTime(item.at)}</time><div><strong>{item.title}</strong>{item.agent && <span className="timeline-agent">{item.agent}</span>}<p>{String(item.detail)}</p></div></li>)}</ol>
       </div>
     </section>
     <footer className="footer-note"><span>AGENTTREE TRANSACTIONAL HARNESS</span><span>{dashboard?.run_id ?? runId} · Refresh reconstructs state from backend records</span></footer>
