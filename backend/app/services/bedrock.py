@@ -96,30 +96,15 @@ class BedrockService:
                 "'agent_id', 'role', and 'task'. For this request, only propose roles "
                 f"{requested_roles}. Request: {customer_request}"
             )
-            payload = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 256,
-            }
-            response = client.invoke_model(
+            response = client.converse(
                 modelId=self.model_id,
-                body=json.dumps(payload),
-                accept="application/json",
-                contentType="application/json",
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": 256, "temperature": 0},
             )
-            raw = response.get("body")
-            if isinstance(raw, bytes):
-                data = json.loads(raw.decode("utf-8"))
-            else:
-                data = json.loads(raw.read().decode("utf-8")) if hasattr(raw, "read") else raw
-
-            if isinstance(data, dict) and "content" in data:
-                text = data["content"][0].get("text", "")
-                parsed = json.loads(text)
-                if isinstance(parsed, dict) and "delegations" in parsed:
-                    return parsed["delegations"]
-            if isinstance(data, dict) and "delegations" in data:
-                return data["delegations"]
+            response_text = response["output"]["message"]["content"][0].get("text", "")
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("delegations"), list):
+                return parsed["delegations"]
         except Exception:
             return None
         return None
