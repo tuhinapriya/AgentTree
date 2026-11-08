@@ -92,7 +92,7 @@ test('loads the verified demo run by default', async () => {
 test('renders dashboard panels and agent list', async () => {
   render(<App />)
 
-  expect(await screen.findByRole('heading', { name: /command center/i })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: /execution control/i })).toBeInTheDocument()
   expect(screen.getByText(/agent hierarchy/i)).toBeInTheDocument()
   expect(screen.getByText(/authorization events/i)).toBeInTheDocument()
   expect(screen.getAllByText(/parent-agent/i).length).toBeGreaterThan(0)
@@ -103,7 +103,7 @@ test('stop branch trigger calls the branch stop endpoint', async () => {
   render(<App />)
 
   await screen.findAllByText(/parent-agent/i)
-  await user.click(screen.getByRole('button', { name: /^Stop branch$/i }))
+  await user.click(screen.getByRole('button', { name: /^Contain branch$/i }))
 
   expect(fetchMock).toHaveBeenCalledWith(
     expect.stringContaining('/runs/run-demo-verify/branches/parent-agent/stop'),
