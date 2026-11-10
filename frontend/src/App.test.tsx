@@ -7,125 +7,63 @@ let fetchMock: ReturnType<typeof vi.fn>
 
 const mockDashboard = {
   run_id: 'run-demo-verify',
-  hierarchy: {
-    run_id: 'run-demo-verify',
-    tree: [
-      {
-        agent_id: 'parent-agent', role: 'parent', status: 'RUNNING', parent_agent_id: null,
-        children: [
-          { agent_id: 'order-agent', role: 'order', status: 'READY', parent_agent_id: 'parent-agent', children: [] },
-          { agent_id: 'account-agent', role: 'account', status: 'BLOCKED', parent_agent_id: 'parent-agent', children: [] },
-        ],
-      },
-    ],
-    nodes: [
-      {
-        agent_id: 'parent-agent',
-        role: 'parent',
-        status: 'RUNNING',
-        parent_agent_id: null,
-        allowed_tools: ['read_orders', 'process_order'],
-      },
-      {
-        agent_id: 'order-agent',
-        role: 'order',
-        status: 'READY',
-        parent_agent_id: 'parent-agent',
-        allowed_tools: ['read_orders', 'process_order'],
-      },
-      {
-        agent_id: 'account-agent',
-        role: 'account',
-        status: 'BLOCKED',
-        parent_agent_id: 'parent-agent',
-        allowed_tools: ['read_account'],
-        policy: {
-          role: 'account',
-          allowed_tools: ['read_account', 'stage_promo_credit'],
-          customer_id: 'C104',
-          max_amount_cents: 5000,
-          commit_on_verified_completion: true,
-          abort_on_scope_violation: true,
-        },
-      },
-    ],
-    edges: [
-      { source: 'parent-agent', target: 'order-agent' },
-      { source: 'parent-agent', target: 'account-agent' },
-    ],
-  },
+  demo_execution: { status: 'SUCCEEDED', mode: 'CONTROLLED_TEST' },
   events: [
-    {
-      agent_id: 'account-agent',
-      decision: 'DENY',
-      tool: 'modify_billing',
-      detail: 'Permission denied for modify_billing.',
-      timestamp: '2026-11-07T10:22:00Z',
-      type: 'authorization',
-    },
+    { event_seq: 1, type: 'TOOL_STAGED', branch_id: 'order-agent', agent_id: 'order-agent-agent', tool: 'stage_refund', payload: { amount_cents: 4500 } },
+    { event_seq: 2, type: 'TOOL_STAGED', branch_id: 'account-agent', agent_id: 'account-agent-agent', tool: 'stage_promo_credit', payload: { amount_cents: 5000 } },
+    { event_seq: 3, type: 'TOOL_DECISION', agent_id: 'account-agent', tool: 'modify_billing', decision: 'DENY' },
+    { event_seq: 4, type: 'POLICY_VIOLATION_CONTAINED', branch_id: 'account-agent', agent_id: 'account-agent-agent' },
+    { event_seq: 5, type: 'COMMIT_ELIGIBLE', branch_id: 'order-agent', agent_id: 'order-agent-agent' },
+    { event_seq: 6, type: 'BRANCH_COMMITTED', branch_id: 'order-agent', agent_id: 'order-agent-agent' },
   ],
+  effects: { effects: [] },
+  business_state: {
+    order: { order_id: 'ORD-882', refunded_cents: 4500 },
+    account: { customer_id: 'C104', promo_credit_cents: 0 },
+  },
 }
 
 beforeEach(() => {
   fetchMock = vi.fn(async (input: string | URL | Request) => {
     const url = String(input)
-
-    if (url.includes('/dashboard')) {
-      return {
-        ok: true,
-        json: async () => mockDashboard,
-      } as Response
-    }
-
-    if (url.includes('/branches/')) {
-      return {
-        ok: true,
-        json: async () => ({ run_id: 'run-demo', branch_id: 'account-agent', status: 'STOPPED' }),
-      } as Response
-    }
-
-    if (url.includes('/demo/reset')) {
-      return {
-        ok: true,
-        json: async () => ({ run_id: 'run-demo', status: 'RESET' }),
-      } as Response
-    }
-
-    return {
-      ok: true,
-      json: async () => ({ ok: true }),
-    } as Response
+    if (url.includes('/dashboard')) return { ok: true, json: async () => mockDashboard } as Response
+    if (url.includes('/demo/live')) return { ok: true, json: async () => ({ run_id: 'new-live-run' }) } as Response
+    return { ok: true, json: async () => ({ ok: true }) } as Response
   })
-
   vi.stubGlobal('fetch', fetchMock)
 })
 
-test('loads the transactional demo run by default', async () => {
+test('starts on a compact parent-to-two-branch transaction view', async () => {
   render(<App />)
-
-  expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/agenttree-transactional-demo/dashboard'),
-    expect.any(Object),
-  )
+  expect(await screen.findByRole('heading', { name: /one request\. two isolated transactions/i })).toBeInTheDocument()
+  expect(screen.getByText('DEMO REQUEST')).toBeInTheDocument()
+  expect(screen.queryByText('Parent agent')).not.toBeInTheDocument()
+  expect(screen.queryByText('ORDER AGENT')).not.toBeInTheDocument()
+  expect(screen.queryByText('ACCOUNT AGENT')).not.toBeInTheDocument()
+  expect(screen.getByText('CONTROLLED_TEST')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /run demo/i })).toBeInTheDocument()
 })
 
-test('renders the tree, database result, and timeline', async () => {
+test('reveals staged, blocked, rolled-back, and committed outcomes in sequence', async () => {
   render(<App />)
 
-  expect(await screen.findByRole('heading', { name: /customer transaction demo/i })).toBeInTheDocument()
-  expect(screen.getByText(/3 registered · 1 parent · 2 child agents/i)).toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: /final database state/i })).toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: /live agent activity/i })).toBeInTheDocument()
-})
+  expect(await screen.findByText('Refund committed', {}, { timeout: 15000 })).toBeInTheDocument()
+  expect(screen.getByText('Parent agent')).toBeInTheDocument()
+  expect(screen.getByText('ORDER AGENT')).toBeInTheDocument()
+  expect(screen.getByText('ACCOUNT AGENT')).toBeInTheDocument()
+  expect(screen.getByText('2 APPROVED')).toBeInTheDocument()
+  expect(screen.getByText('1 REJECTED')).toBeInTheDocument()
+  expect(screen.getAllByText('COMMITTED').length).toBeGreaterThan(0)
+  expect(screen.getAllByText('ROLLED BACK').length).toBeGreaterThan(0)
+  expect(screen.getByText('Modify billing')).toBeInTheDocument()
+  expect(screen.getByText('+$45.00 applied')).toBeInTheDocument()
+  expect(screen.getByText('$50.00 discarded')).toBeInTheDocument()
+  expect(screen.getByText('DATABASE UPDATED')).toBeInTheDocument()
+}, 20000)
 
-test('selecting an agent shows its effective permissions', async () => {
+test('run demo starts a fresh live run', async () => {
   const user = userEvent.setup()
   render(<App />)
-
-  await screen.findByRole('heading', { name: /customer transaction demo/i })
-  await user.click(screen.getByRole('button', { name: /account agent/i }))
-  expect(screen.getByRole('heading', { name: /account agent permissions/i })).toBeInTheDocument()
-  expect(screen.getByText(/customer c104/i)).toBeInTheDocument()
-  expect(screen.getByText(/stage promo credit/i)).toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /refresh|reset demo|contain branch/i })).not.toBeInTheDocument()
+  await user.click(await screen.findByRole('button', { name: /run demo/i }))
+  expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/demo/live'), expect.objectContaining({ method: 'POST' }))
 })

@@ -1,273 +1,163 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
-type AgentNode = {
-  agent_id: string
-  role: string
-  parent_agent_id?: string | null
-  status: string
-  task_state?: string
-  allowed_tools?: string[]
-  branch_id?: string
-  pid?: number | null
-  exit_code?: number | null
-  process_create_time?: string | null
-  stopped_at?: string | null
-  children?: AgentNode[]
-  policy?: AgentPolicy
-}
-type AgentPolicy = {
-  role: string
-  allowed_tools: string[]
-  customer_id?: string | null
-  order_id?: string | null
-  max_amount_cents?: number | null
-  commit_on_verified_completion: boolean
-  abort_on_scope_violation: boolean
-}
-type EventEntry = {
-  event_seq?: number
-  timestamp?: string
-  agent_id?: string
-  branch_id?: string | null
-  tool?: string
-  type?: string
-  decision?: string
-  reason_code?: string
-  detail?: string
-  origin?: string
-  payload?: Record<string, unknown>
-}
-type Effect = {
-  action_id: string
-  branch_id: string
-  tool: string
-  arguments: Record<string, unknown>
-  state: string
-  created_at: string
-}
-type Branch = { branch_id: string; state: string; violation_count: number }
-type TimelineItem = { at: string; title: string; detail: string; state: string; agent?: string; source?: string }
-type BusinessState = {
-  account: { customer_id: string; promo_credit_cents: number; version: number }
-  order: { order_id: string; paid_cents: number; refunded_cents: number; version: number; status: string }
-}
+type EventEntry = { event_seq?: number; timestamp?: string; agent_id?: string; branch_id?: string | null; tool?: string; type?: string; decision?: string; payload?: Record<string, unknown> }
+type Effect = { branch_id: string; tool: string; arguments: Record<string, unknown>; state: string }
 type DashboardPayload = {
   run_id: string
-  run?: { run_id: string; scenario: string; status: string; created_at: string }
-  demo_execution?: { status: string; started_at?: string; finished_at?: string; error?: string }
-  hierarchy: { run_id: string; tree?: AgentNode[]; nodes?: AgentNode[]; agents?: AgentNode[]; edges?: Array<{ source: string; target: string }> }
+  demo_execution?: { status: string; error?: string; mode?: string }
   events: EventEntry[]
-  effects?: { effects: Effect[]; branches: Branch[] }
-  business_state?: BusinessState
+  effects?: { effects: Effect[] }
+  business_state?: { order: { order_id: string; refunded_cents: number }; account: { customer_id: string; promo_credit_cents: number } }
 }
+type Beat = { id: string; branch: 'parent' | 'order' | 'account'; kind: 'request' | 'parent-created' | 'worker-created' | 'staged' | 'blocked' | 'rolled-back' | 'verified' | 'committed'; title: string; value?: string; delayMs: number }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const FALLBACK_RUN = 'agenttree-transactional-demo'
+const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
+
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { headers: { 'Content-Type': 'application/json' }, ...init })
-  if (!response.ok) throw new Error(`Request failed for ${path}: ${response.status}`)
-  return (await response.json()) as T
-}
-const DEMO_RUN_FALLBACKS = ['agenttree-transactional-demo', 'agenttree-live-demo', 'run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
-const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
-const shortTime = (value?: string) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
-const fullTime = (value?: string) => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : 'Time unavailable'
-const humanizeToolName = (tool?: string) => {
-  if (!tool) return 'tool action'
-  return tool
-    .replaceAll('_', ' ')
-    .replace(/\b(?:read|stage|modify|commit|delegate|verify)\b/gi, (match) => match.toLowerCase() === 'read' ? 'read' : match.toLowerCase() === 'stage' ? 'stage' : match.toLowerCase() === 'modify' ? 'modify' : match.toLowerCase() === 'commit' ? 'commit' : match.toLowerCase() === 'delegate' ? 'delegate' : 'verify')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-}
-const getSourceLabel = (source?: string) => {
-  switch (source) {
-    case 'MODEL':
-      return 'AI model'
-    case 'CONTROLLED_TEST':
-      return 'Runtime engine'
-    case 'SUPERVISOR':
-      return 'Safety checkpoint'
-    case 'OPERATOR':
-      return 'Operator'
-    default:
-      return 'System'
-  }
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`)
+  return response.json() as Promise<T>
 }
 
 function App() {
-  const [runId, setRunId] = useState(DEMO_RUN_FALLBACKS[0])
+  const [runId, setRunId] = useState(FALLBACK_RUN)
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
-  const [selectedAgentId, setSelectedAgentId] = useState('order-agent')
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
-  const [launchingDemo, setLaunchingDemo] = useState(false)
+  const [revealed, setRevealed] = useState(0)
+  const [launching, setLaunching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const runIdRef = useRef(runId)
-  const requestInFlight = useRef(false)
-  useEffect(() => { runIdRef.current = runId }, [runId])
+  const inFlight = useRef(false)
 
-  const loadDashboard = async (targetRunId: string = runIdRef.current, allowFallback = false) => {
-    if (requestInFlight.current) return
-    const requestedRunId = targetRunId.trim()
-    const candidates = allowFallback
-      ? Array.from(new Set(requestedRunId ? [requestedRunId, ...DEMO_RUN_FALLBACKS.filter((id) => id !== requestedRunId)] : DEMO_RUN_FALLBACKS))
-      : requestedRunId ? [requestedRunId] : []
-    if (!candidates.length) { setError('Run ID is required.'); return }
-    requestInFlight.current = true
-    let lastError: string | null = null
+  const loadDashboard = async (id = runIdRef.current) => {
+    if (inFlight.current) return
+    inFlight.current = true
     try {
-      for (const candidate of candidates) {
-        try {
-          const payload = await fetchJson<DashboardPayload>(`/runs/${candidate}/dashboard`)
-          setRunId(candidate)
-          setDashboard(payload)
-          setLastUpdated(new Date())
-          setError(null)
-          return
-        } catch (e) { lastError = e instanceof Error ? e.message : 'Unable to load dashboard data.' }
-      }
-      setError(lastError ?? 'Unable to load dashboard data.')
-    } finally {
-      requestInFlight.current = false
-    }
+      const payload = await fetchJson<DashboardPayload>(`/runs/${id}/dashboard`)
+      setDashboard(payload)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to load demo.')
+    } finally { inFlight.current = false }
   }
-  const handleStartLiveDemo = async () => {
-    setLaunchingDemo(true)
+
+  const startDemo = async () => {
+    setLaunching(true)
     setError(null)
+    setRevealed(0)
     try {
-      const started = await fetchJson<{ run_id: string }>('/demo/mock', { method: 'POST' })
+      const started = await fetchJson<{ run_id: string }>('/demo/live', { method: 'POST' })
       runIdRef.current = started.run_id
       setRunId(started.run_id)
+      setDashboard(null)
       await loadDashboard(started.run_id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to start the demo.')
-    } finally {
-      setLaunchingDemo(false)
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to start demo.') }
+    finally { setLaunching(false) }
   }
-  useEffect(() => { void loadDashboard(runIdRef.current, true) }, [])
+
+  useEffect(() => { void loadDashboard() }, [])
   useEffect(() => {
-    const timer = window.setInterval(() => { void loadDashboard(runIdRef.current) }, 1500)
+    const timer = window.setInterval(() => { void loadDashboard() }, 350)
     return () => window.clearInterval(timer)
   }, [])
 
-  const agents = dashboard?.hierarchy.nodes ?? dashboard?.hierarchy.agents ?? []
-  const roots = dashboard?.hierarchy.tree ?? agents.filter((agent) => !agent.parent_agent_id)
-  const workerCount = agents.filter((agent) => agent.parent_agent_id !== null && agent.parent_agent_id !== undefined).length
-  const selectedAgent = agents.find((agent) => agent.agent_id === selectedAgentId) ?? agents[0] ?? null
   const events = dashboard?.events ?? []
-  const effects = dashboard?.effects?.effects ?? []
-  const branches = dashboard?.effects?.branches ?? []
-  const state = dashboard?.business_state
-  const timeline = useMemo(() => {
-    const items: TimelineItem[] = []
-    const processStarts = agents.map((agent) => agent.process_create_time).filter((value): value is string => Boolean(value)).sort()
-    if (processStarts.length) items.push({ at: processStarts[0], title: 'Agents launched', detail: `${agents.length} configured agents started`, state: 'info', source: 'SUPERVISOR' })
-    else if (dashboard?.run?.created_at) items.push({ at: dashboard.run.created_at, title: 'Run configured', detail: `${agents.length} agents registered`, state: 'info' })
+  const eventSignature = events.map((event) => [event.event_seq, event.type, event.tool, event.decision, event.branch_id, event.agent_id].join(':')).join('|')
+  const beats = useMemo<Beat[]>(() => {
+    const result: Beat[] = [
+      { id: 'demo-request', branch: 'parent', kind: 'request', title: 'Demo request received', value: 'CUSTOMER REQUEST', delayMs: 700 },
+      { id: 'parent-started', branch: 'parent', kind: 'parent-created', title: 'Parent agent takes the request', value: 'COORDINATOR READY', delayMs: 1250 },
+      { id: 'order-worker-started', branch: 'order', kind: 'worker-created', title: 'Order worker assigned', value: 'ORDER TASK', delayMs: 750 },
+      { id: 'account-worker-started', branch: 'account', kind: 'worker-created', title: 'Account worker assigned', value: 'ACCOUNT TASK', delayMs: 1400 },
+    ]
     for (const event of events) {
-      if (!event.timestamp) continue
-      const actor = event.branch_id ?? event.agent_id
-      const displayName = (actor ?? 'Agent').replace(/-agent$/, '').replaceAll('-', ' ')
-      const effect = effects.find((item) => item.branch_id === event.branch_id)
-      const effectLabel = effect ? `${money(Number(effect.arguments.amount_cents ?? 0))} ${effect.tool === 'stage_refund' ? 'refund' : 'promotional credit'}` : 'Pending changes'
-      if (event.tool === 'bedrock.delegate') items.push({ at: event.timestamp, title: 'Parent delegated work', detail: 'Tasks assigned to child agents.', state: 'info', source: event.origin })
-      else if (event.tool === 'worker.complete') items.push({ at: event.timestamp, title: `${displayName} finished its task`, detail: 'Worker reported successful completion.', state: 'ready', source: event.origin })
-      else if (event.type === 'TOOL_DECISION' && event.tool !== 'bedrock.converse') items.push({ at: event.timestamp, title: `${displayName} · ${humanizeToolName(event.tool)}`, detail: event.decision === 'DENY' ? 'This tool is outside the agent’s permissions.' : 'Gateway allowed this tool call.', state: event.decision === 'DENY' ? 'denied' : 'allowed', source: event.origin })
-      else if (event.type === 'TOOL_STAGED') items.push({ at: event.timestamp, title: 'Change staged', detail: `${event.tool === 'stage_refund' ? 'Refund' : 'Promotional credit'} · ${money(Number(event.payload?.amount_cents ?? 0))}`, state: 'staged', agent: displayName, source: event.origin })
-      else if (event.type === 'POLICY_VIOLATION_CONTAINED' || event.type === 'BRANCH_ABORTED') items.push({ at: event.timestamp, title: `${displayName} branch stopped`, detail: `${effectLabel} discarded after the blocked action.`, state: 'failed', agent: displayName, source: event.origin })
-      else if (event.type === 'COMMIT_ELIGIBLE') items.push({ at: event.timestamp, title: `${displayName} passed completion checks`, detail: `${effectLabel} is ready to apply.`, state: 'ready', agent: displayName, source: event.origin })
-      else if (event.type === 'BRANCH_COMMITTED') items.push({ at: event.timestamp, title: `${displayName} committed its change`, detail: `${effectLabel} applied to the database.`, state: 'committed', agent: displayName, source: event.origin })
+      const branch = (event.branch_id ?? event.agent_id ?? '').startsWith('order') ? 'order' : 'account'
+      if (event.type === 'TOOL_STAGED') {
+        const cents = Number(event.payload?.amount_cents ?? 0)
+        result.push({ id: `staged-${event.event_seq}`, branch, kind: 'staged', title: `${branch === 'order' ? 'Refund' : 'Credit'} staged`, value: money(cents), delayMs: branch === 'order' ? 850 : 1320 })
+      } else if (event.type === 'TOOL_DECISION' && event.decision === 'DENY') {
+        result.push({ id: `blocked-${event.event_seq}`, branch, kind: 'blocked', title: 'Modify billing blocked', value: 'OUT OF SCOPE', delayMs: 680 })
+      } else if (event.type === 'POLICY_VIOLATION_CONTAINED' || event.type === 'BRANCH_ABORTED') {
+        result.push({ id: `rollback-${event.event_seq}`, branch, kind: 'rolled-back', title: 'Account transaction rolled back', value: 'CREDIT DISCARDED', delayMs: 1180 })
+      } else if (event.type === 'COMMIT_ELIGIBLE') {
+        result.push({ id: `verified-${event.event_seq}`, branch, kind: 'verified', title: 'Completion verified', value: 'READY TO COMMIT', delayMs: 930 })
+      } else if (event.type === 'BRANCH_COMMITTED') {
+        result.push({ id: `commit-${event.event_seq}`, branch, kind: 'committed', title: 'Refund committed', value: 'DATABASE UPDATED', delayMs: 670 })
+      }
     }
-    for (const effect of effects) if (effect.state === 'ABORTED' && !events.some((event) => event.type === 'POLICY_VIOLATION_CONTAINED' && event.branch_id === effect.branch_id)) items.push({ at: effect.created_at, title: 'Staged effect aborted', detail: humanizeToolName(effect.tool), state: 'failed', agent: effect.branch_id })
-    return items.sort((a, b) => a.at.localeCompare(b.at))
-  }, [agents, dashboard?.run, events, effects])
+    return result
+  }, [eventSignature])
 
-  const renderTreeNode = (agent: AgentNode) => {
-    const branch = branches.find((item) => item.branch_id === (agent.branch_id ?? agent.agent_id))
-    const effect = effects.find((item) => item.branch_id === (agent.branch_id ?? agent.agent_id))
-    const callCount = toolCalls.filter((event) => event.agent_id === agent.agent_id).length
-    const outcome = agent.role === 'parent' ? 'PARENT' : branch?.state ?? agent.task_state ?? 'IN PROGRESS'
-    const effectDescription = effect ? `${money(Number(effect.arguments.amount_cents ?? 0))} ${effect.tool === 'stage_refund' ? 'refund' : 'promotional credit'}` : ''
-    const resultText = agent.role === 'parent'
-      ? `Delegates to ${agent.children?.length ?? 0} workers`
-      : effect?.state === 'COMMITTED' ? `${effectDescription} applied`
-        : effect?.state === 'ABORTED' ? `${effectDescription} discarded`
-          : effect ? `${effectDescription} staged` : 'Task assigned'
-    return <div className="tree-branch" key={agent.agent_id}>
-      <button type="button" aria-pressed={selectedAgent?.agent_id === agent.agent_id} onClick={() => setSelectedAgentId(agent.agent_id)} className={`tree-node outcome-${outcome.toLowerCase()} ${selectedAgent?.agent_id === agent.agent_id ? 'selected' : ''}`}>
-        <span className="node-icon">{agent.role.slice(0, 1).toUpperCase()}</span><span className="node-copy"><span className="node-role">{agent.role === 'parent' ? 'Coordinator' : `${agent.role} agent`}</span><span className="node-result">{resultText}</span></span>
-        {agent.role !== 'parent' && <span className={`node-status ${outcome.toLowerCase()}`}>{outcome.replaceAll('_', ' ')}</span>}
-        {agent.role !== 'parent' && <span className="node-calls">{callCount} tool calls</span>}
-      </button>
-      {agent.children?.length ? <div className="tree-children">{agent.children.map(renderTreeNode)}</div> : null}
-    </div>
-  }
-  const toolCalls = events.filter((event) => event.type === 'TOOL_DECISION' && !['bedrock.converse', 'bedrock.delegate', 'worker.complete'].includes(event.tool ?? ''))
-  const allowedCalls = toolCalls.filter((event) => event.decision === 'ALLOW').length
-  const blockedCalls = toolCalls.filter((event) => event.decision === 'DENY').length
-  const selectedPolicy = selectedAgent?.policy
-  const allowedTools = selectedPolicy?.allowed_tools ?? selectedAgent?.allowed_tools ?? []
-  const demoIsActive = ['STARTING', 'RUNNING'].includes(dashboard?.demo_execution?.status ?? '')
-  const branchRule = selectedPolicy?.abort_on_scope_violation
-    ? 'Abort branch and discard staged changes after a scope violation'
-    : selectedPolicy?.commit_on_verified_completion
-      ? 'Commit only after task completion is verified'
-      : 'Coordinates workers; no transactional tools'
-  const overallOutcome = blockedCalls > 0 ? 'Policy-contained' : effects.some((effect) => effect.state === 'COMMITTED') ? 'Verified flow' : 'Awaiting run'
+  useEffect(() => {
+    if (revealed >= beats.length) return
+    const timer = window.setTimeout(() => setRevealed((current) => Math.min(current + 1, beats.length)), beats[revealed]?.delayMs ?? 850)
+    return () => window.clearTimeout(timer)
+  }, [beats.length, revealed, runId])
 
-  return <div className="app-shell">
-    <header className="topbar">
-      <div className="brand-lockup"><div className="brand-mark">A</div><div><p className="eyebrow">AgentTree / Runtime security</p><h1>Customer transaction demo</h1></div></div>
-      <div className="header-actions"><span className="run-id-label">{dashboard?.run_id ?? runId}</span><button type="button" className="run-demo-button" title="Starts a fresh demo run and keeps previous run history." onClick={() => void handleStartLiveDemo()} disabled={launchingDemo || demoIsActive}>{launchingDemo || demoIsActive ? 'Demo run starting…' : 'Run demo again'}</button></div>
+  const shownBeats = beats.slice(0, revealed)
+  const parentVisible = shownBeats.some((beat) => beat.kind === 'parent-created')
+  const orderVisible = shownBeats.some((beat) => beat.kind === 'worker-created' && beat.branch === 'order')
+  const accountVisible = shownBeats.some((beat) => beat.kind === 'worker-created' && beat.branch === 'account')
+  const accountBlocked = shownBeats.some((beat) => beat.kind === 'blocked')
+  const accountRolledBack = shownBeats.some((beat) => beat.kind === 'rolled-back')
+  const orderStaged = shownBeats.some((beat) => beat.branch === 'order' && beat.kind === 'staged')
+  const orderVerified = shownBeats.some((beat) => beat.kind === 'verified')
+  const orderCommitted = shownBeats.some((beat) => beat.kind === 'committed')
+  const accountStaged = shownBeats.some((beat) => beat.branch === 'account' && beat.kind === 'staged')
+  const stagedCount = shownBeats.filter((beat) => beat.kind === 'staged').length
+  const active = ['STARTING', 'RUNNING'].includes(dashboard?.demo_execution?.status ?? '')
+  const runMode = dashboard?.demo_execution?.mode ?? (active ? 'BEDROCK ATTEMPT' : 'RUN VIEW')
+  const state = dashboard?.business_state
+
+  return <main className="demo-screen">
+    <header className="demo-header">
+      <div><span className="demo-brand">AGENTTREE <i>×</i> TRANSACTIONS <em className={runMode === 'CONTROLLED_TEST' ? 'mode-scripted' : ''}>{runMode}</em></span><h1>One request. Two isolated transactions.</h1><div className="action-count"><b>{stagedCount} APPROVED</b><span>·</span><b className={accountBlocked ? 'count-blocked' : ''}>{accountBlocked ? '1 REJECTED' : '1 POLICY CHECK'}</b></div></div>
+      <button className="run-demo-button" onClick={() => void startDemo()} disabled={launching || active}>{launching || active ? 'RUNNING…' : '▶  RUN DEMO'}</button>
     </header>
 
-    <div className="summary-strip">
-      <div><small>Run ID</small><strong>{dashboard?.run_id ?? runId}</strong></div>
-      <div><small>Agents</small><strong>{agents.length}</strong></div>
-      <div><small>Allowed</small><strong>{allowedCalls}</strong></div>
-      <div><small>Blocked</small><strong>{blockedCalls}</strong></div>
-      <div><small>Outcome</small><strong className="summary-status">{overallOutcome}</strong></div>
-    </div>
+    {error && <div className="demo-error">{error}</div>}
+    {dashboard?.demo_execution?.status === 'FAILED' && <div className="demo-error">Demo failed: {dashboard.demo_execution.error}</div>}
 
-    {error ? <div className="error-banner" role="alert">{error}</div> : null}
-    {dashboard?.demo_execution?.status === 'FAILED' && <div className="error-banner" role="alert">Live demo failed: {dashboard.demo_execution.error}</div>}
+    <section className="agent-flow">
+      {(!parentVisible || revealed < 3) && <div className={`prompt-card ${parentVisible ? 'prompt-delivered' : ''}`}><small>DEMO REQUEST</small><p>“Please inspect order ORD-882 and account C104. Stage a $45 refund and $50 promo credit if eligible. Check whether a billing change for C999 is allowed.”</p></div>}
+      {parentVisible && <div className="parent-node"><span className="parent-avatar">P</span><b>Parent agent</b><small>ASSIGNS TWO TASKS</small></div>}
+      <div className="branch-grid">
+        {orderVisible && <article className={`branch-card order-branch ${orderCommitted ? 'is-committed' : ''}`}>
+          <header className="branch-heading"><span className="agent-avatar">O</span><div><small>ORDER AGENT</small><strong>Order ORD-882</strong></div><span className="branch-status">{orderCommitted ? 'COMMITTED' : orderVerified ? 'VERIFIED' : orderStaged ? 'STAGED' : 'WAITING'}</span></header>
+          <div className="step-track">
+            <div className={`action-step ${orderStaged ? 'step-done' : 'step-current'}`}><span className="step-dot">{orderStaged ? '✓' : '1'}</span><div><small>PROPOSES</small><b>Refund $45.00</b></div></div>
+            <span className={`step-line ${orderStaged ? 'line-done' : ''}`} />
+            <div className={`action-step ${orderStaged ? orderCommitted ? 'step-done' : 'step-current' : ''}`}><span className="step-dot">{orderCommitted ? '✓' : '2'}</span><div><small>STAGE</small><b>{orderCommitted ? 'Committed' : 'Isolated change'}</b></div></div>
+            <span className={`step-line ${orderVerified ? 'line-done' : ''}`} />
+            <div className={`action-step ${orderVerified ? orderCommitted ? 'step-done' : 'step-current' : ''}`}><span className="step-dot">{orderCommitted ? '✓' : '3'}</span><div><small>VERIFY → COMMIT</small><b>{orderCommitted ? 'Database updated' : 'Waits for verification'}</b></div></div>
+          </div>
+          <div className="branch-foot"><span>ORDER REFUND</span><strong>{orderCommitted ? money(state?.order.refunded_cents ?? 0) : '$0.00'}</strong><em>{orderCommitted ? '+$45.00 applied' : 'No write yet'}</em></div>
+        </article>}
 
-    <section className="panel hierarchy-panel story-tree-panel">
-      <div className="panel-header"><div><h2>Agents in this run</h2><p className="tree-caption">{agents.length} registered · {roots.length} parent · {workerCount} child agents · select a node for its rules</p></div></div>
-      <div className="tree-list">{agents.length === 0 ? <p className="empty-state">No agents in this run.</p> : roots.map(renderTreeNode)}</div>
-    </section>
-
-    {selectedAgent && <section className="panel policy-panel">
-      <div className="panel-header"><div><h2>{selectedAgent.role === 'parent' ? 'Coordinator permissions' : `${selectedAgent.role} agent permissions`}</h2></div><span className="policy-enforced">Gateway enforced</span></div>
-      <div className="permission-summary">
-        <div><small>ALLOWED TOOLS</small><div className="tool-tags">{allowedTools.length ? allowedTools.map((tool) => <span key={tool}>{tool.replaceAll('_', ' ')}</span>) : <span>No business tools</span>}</div></div>
-        <div><small>DATA SCOPE</small><strong>{selectedPolicy?.order_id ? `Order ${selectedPolicy.order_id}` : selectedPolicy?.customer_id ? `Customer ${selectedPolicy.customer_id}` : 'Delegation only'}</strong></div>
-        {selectedPolicy?.max_amount_cents != null && <div><small>{selectedAgent.role === 'order' ? 'MAX REFUND' : 'MAX PROMO CREDIT'}</small><strong>{money(selectedPolicy.max_amount_cents)}</strong></div>}
-        <div><small>TRANSACTION RULE</small><strong>{branchRule}</strong></div>
-      </div>
-    </section>}
-
-    <section className="panel transaction-panel">
-      <div className="panel-header"><div><h2>Final database state</h2></div></div>
-      <div className="record-results">
-        <div className="record-result-card order-card">
-          <span className="record-label">Order</span>
-          <strong>{state?.order.order_id ?? 'ORD-882'}</strong>
-          <small>Refund applied</small>
-          <b>{money(state?.order.refunded_cents ?? 0)}</b>
-        </div>
-        <div className="record-result-card account-card">
-          <span className="record-label">Account</span>
-          <strong>{state?.account.customer_id ?? 'C104'}</strong>
-          <small>Promotional credit</small>
-          <b>{money(state?.account.promo_credit_cents ?? 0)}</b>
-        </div>
+        {accountVisible && <article className={`branch-card account-branch ${accountRolledBack ? 'is-rolled-back' : ''}`}>
+          <header className="branch-heading"><span className="agent-avatar">A</span><div><small>ACCOUNT AGENT</small><strong>Customer C104</strong></div><span className="branch-status">{accountRolledBack ? 'ROLLED BACK' : accountBlocked ? 'BLOCKED' : accountStaged ? 'STAGED' : 'WAITING'}</span></header>
+          <div className="step-track account-track">
+            <div className={`action-step ${accountStaged ? 'step-done' : 'step-current'}`}><span className="step-dot">{accountStaged ? '✓' : '1'}</span><div><small>PROPOSES</small><b>Credit $50.00</b></div></div>
+            <span className={`step-line ${accountStaged ? 'line-done' : ''}`} />
+            <div className={`action-step ${accountStaged ? accountBlocked ? 'step-denied' : 'step-current' : ''}`}><span className="step-dot">{accountBlocked ? '!' : '2'}</span><div><small>{accountBlocked ? 'POLICY REJECTS' : 'STAGE'}</small><b>{accountBlocked ? 'Modify billing' : 'Isolated credit'}</b></div></div>
+            <span className={`step-line ${accountRolledBack ? 'line-denied' : ''}`} />
+            <div className={`action-step ${accountRolledBack ? 'step-denied' : ''}`}><span className="step-dot">{accountRolledBack ? '×' : '3'}</span><div><small>BRANCH ACTION</small><b>{accountRolledBack ? 'Credit discarded' : 'Protected'}</b></div></div>
+          </div>
+          <div className="branch-foot"><span>PROMO CREDIT</span><strong>{accountRolledBack ? money(state?.account.promo_credit_cents ?? 0) : '$0.00'}</strong><em>{accountRolledBack ? '$50.00 discarded' : 'No write yet'}</em></div>
+        </article>}
       </div>
     </section>
 
-    <section className="panel run-story-panel">
-      <div className="panel-header"><div><h2>Live agent activity</h2><p className="tree-caption">{toolCalls.length} tool calls · {allowedCalls} allowed · {blockedCalls} blocked</p></div><span className="live-indicator"><i className="live-dot" />Polling · {lastUpdated ? `updated ${shortTime(lastUpdated.toISOString())}` : 'connecting'}</span></div>
-      <ol className="run-timeline">{timeline.length === 0 ? <li className="empty-state">No activity yet. Start a fresh run to begin the workflow.</li> : timeline.map((item, index) => <li key={`${item.at}-${item.title}-${index}`} className={`timeline-${item.state}`}><span className="timeline-marker"/><time>{fullTime(item.at)}</time><div><strong>{item.title}</strong>{item.state === 'allowed' && <b className="call-decision allowed">ALLOWED</b>}{item.state === 'denied' && <b className="call-decision denied">BLOCKED</b>}{item.agent && <span className="timeline-agent">{item.agent}</span>}<p>{String(item.detail)}</p>{item.source && <small className="activity-source">{getSourceLabel(item.source)}</small>}</div></li>)}</ol>
+    <section className="demo-progress" aria-live="polite">
+      <div className="progress-top"><b>WHAT HAPPENED</b><span>{revealed} / {beats.length || 6} STEPS</span></div>
+      <div className="progress-rail">{Array.from({ length: Math.max(beats.length, 6) }, (_, index) => <i key={index} className={index < revealed ? 'progress-done' : index === revealed && revealed < beats.length ? 'progress-active' : ''} />)}</div>
+      <div className="latest-step">{shownBeats.length ? <><span className={`latest-icon ${shownBeats[shownBeats.length - 1].kind}`}>{shownBeats[shownBeats.length - 1].kind === 'blocked' || shownBeats[shownBeats.length - 1].kind === 'rolled-back' ? '×' : '✓'}</span><b>{shownBeats[shownBeats.length - 1].title}</b><strong>{shownBeats[shownBeats.length - 1].value}</strong></> : <><span className="latest-icon pending">·</span><b>Agents ready</b><strong>START THE RUN</strong></>}</div>
     </section>
-  </div>
+
+    <footer className="demo-footer"><span>ORDER TRANSACTION <b>{orderCommitted ? 'COMMITTED' : 'OPEN'}</b></span><span>ACCOUNT TRANSACTION <b className={accountRolledBack ? 'bad' : ''}>{accountRolledBack ? 'ROLLED BACK' : 'OPEN'}</b></span><span>RUN <code>{dashboard?.run_id ?? runId}</code></span></footer>
+  </main>
 }
+
 export default App

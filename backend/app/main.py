@@ -77,6 +77,7 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
                 "status": "SUCCEEDED",
                 "started_at": demo_jobs[run_id]["started_at"],
                 "finished_at": datetime.now(timezone.utc).isoformat(),
+                "mode": "MODEL",
             }
         except Exception as exc:
             try:

@@ -129,9 +129,12 @@ def run_live_demo(
         if not account_effect or account_effect["state"] != "ABORTED" or account_effect["arguments"].get("amount_cents") != 5000:
             raise RuntimeError("Account policy violation did not abort the expected $50 staged credit")
 
+        # Leave a visible checkpoint after the model calls and before verification.
+        time.sleep(1.2)
         ready = _request("POST", base_url, f"/runs/{run_id}/branches/order-agent/complete")
         if ready.get("state") != "READY_TO_COMMIT":
             raise RuntimeError(f"Order branch did not become ready to commit: {ready.get('state')}")
+        time.sleep(1.2)
         commit = _request("POST", base_url, f"/runs/{run_id}/branches/order-agent/commit")
         if commit.get("state") != "COMMITTED":
             raise RuntimeError(f"Order branch commit failed: {commit.get('state')}")

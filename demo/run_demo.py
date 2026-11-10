@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import requests
 
 
@@ -75,6 +77,8 @@ def run_demo_sequence(
             },
         )
         order_stage.raise_for_status()
+        # Hold each visible checkpoint long enough to narrate in a screen recording.
+        time.sleep(1.2)
         account_stage = _post(
             base_url,
             f"/runs/{run_id}/gateway/execute",
@@ -87,6 +91,7 @@ def run_demo_sequence(
             },
         )
         account_stage.raise_for_status()
+        time.sleep(1.2)
 
         # The scripted probe is intentionally labeled. It demonstrates policy
         # enforcement; it is not presented as a model-generated decision.
@@ -103,6 +108,7 @@ def run_demo_sequence(
         )
         if denied.status_code != 403:
             raise RuntimeError(f"Expected the controlled billing probe to be denied: {denied.status_code} {denied.text}")
+        time.sleep(1.5)
 
         order_after_containment = _post(
             base_url,
@@ -116,11 +122,13 @@ def run_demo_sequence(
             },
         )
         order_after_containment.raise_for_status()
+        time.sleep(1.2)
 
         # Until real workers are added, completion is an explicit operator
         # checkpoint for this deterministic controlled-test sequence.
         complete = _post(base_url, f"/runs/{run_id}/branches/order-agent/complete")
         complete.raise_for_status()
+        time.sleep(1.2)
         commit = _post(base_url, f"/runs/{run_id}/branches/order-agent/commit")
         commit.raise_for_status()
 
