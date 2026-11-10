@@ -1,18 +1,28 @@
 # AgentTree
 
-AgentTree is a transactional execution harness for managed AI agents. It routes protected tool calls through a trusted gateway and keeps approved business changes staged until a branch is ready to commit. A policy violation revokes and stops that branch, aborting its pending changes while healthy branches continue.
+AgentTree is a transactional governance framework for multi-agent AI systems. It demonstrates how autonomous agents can operate within scoped permissions, validate tool usage, and commit approved business actions only after verification.
 
-The primary hackathon demo uses Amazon Bedrock to delegate work to live Order and Account worker processes. The workers decide which protected tools to call; every proposal goes through the gateway. The Account task includes an explicit red-team probe: after staging a $50 credit, it requests a billing change for customer `C999`. The gateway denies the tool call, revokes and stops Account, and aborts its pending credit. Order independently stages a $45 refund, completes its task, and is committed by the trusted supervisor after its state is verified. Events identify their source as `MODEL`, `SUPERVISOR`, or `OPERATOR`.
+The project models a customer-transaction workflow with a coordinator agent and specialized Order and Account worker agents. Protected operations are routed through a trusted gateway, staged before they are applied, and only committed when the system confirms they are valid and safe. If a branch violates its policy, the system aborts its pending change and keeps the rest of the workflow running.
 
-The current demo uses a fixed topology: one registered coordinator and two registered child workers. Bedrock proposes the child tasks and chooses worker tool calls; the server configures the roster and the gateway enforces its trusted policies. The coordinator's delegation is mediated by the backend rather than executed by its idle worker process. Use **Run demo again** in the dashboard to start a fresh Bedrock-backed run; previous run history is preserved.
+A live dashboard visualizes the agent hierarchy, tool decisions, staged effects, and final business state in real time. The default demo path can run against Amazon Bedrock when AWS credentials and model access are available, and a deterministic no-AWS fallback is also included for local validation and demo scenarios.
 
-A deterministic presentation is also available as a no-AWS fallback. Its actions are labeled `CONTROLLED_TEST` and must not be described as model-generated.
+## Why this project matters
+
+Modern AI systems often need more than prompt execution. They need:
+
+- role-based access control for protected actions
+- verified task completion before commit
+- isolation of unsafe or out-of-scope tool actions
+- clear visibility into how decisions are made and recorded
+
+AgentTree is designed to explore that operational layer directly. It treats agent workflows as transactional systems rather than uncontrolled tool invocations.
 
 ## Requirements
 
 - Python 3.11 or newer
 - Node.js 20 or newer and npm
-- AWS credentials with Amazon Bedrock model access for the primary live demo; the controlled fallback runs without AWS credentials
+- AWS credentials and Bedrock model access for the live model-driven flow
+- An optional no-AWS deterministic demo fallback for local use without cloud access
 
 ## Install
 
@@ -27,9 +37,9 @@ npm ci
 cd ..
 ```
 
-## Run the dashboard and demo
+## Run the application
 
-Start the backend in one terminal from the repository root:
+Start the backend in one terminal:
 
 ```bash
 source .venv/bin/activate
@@ -43,57 +53,52 @@ cd frontend
 npm run dev
 ```
 
-Open the Vite URL (normally `http://localhost:5173`). The dashboard selects `agenttree-live-demo` by default and rebuilds its view from persisted backend snapshots.
+Open the frontend URL in a browser (typically `http://localhost:5173`).
 
-Run the Bedrock-driven demo from a third terminal at the repository root:
+Run the demo from a third terminal:
 
 ```bash
 source .venv/bin/activate
 python cli/agenttree.py demo
 ```
 
-The parent model delegates to Order and Account. Their Bedrock-powered workers call `read_order`, `stage_refund`, `read_account`, and `stage_promo_credit`; the Account worker then proposes `modify_billing`. The gateway denies and contains that branch. The supervisor commits Order only after the Order worker reports completion and the expected staged refund is present. The command prints the model delegation and persisted evidence; the dashboard shows the same run. Set `AWS_REGION` and `AWS_BEDROCK_MODEL_ID` in the backend shell when they differ from the defaults.
-
-For the deterministic no-AWS fallback:
+For the no-AWS deterministic path:
 
 ```bash
 python cli/agenttree.py demo --controlled
 ```
 
-To reset either run, stop its managed workers, and restore its fixtures:
+## Architecture overview
 
-```bash
-python cli/agenttree.py reset agenttree-live-demo
-```
+The system is organized around a few core concepts:
 
-Other useful commands:
+- coordinator delegation: a parent agent splits customer work into tasks
+- branch execution: worker agents perform scoped actions and record effects
+- gateway enforcement: protected tools are authorized through a trusted policy layer
+- staged transactions: valid changes are prepared before being committed
+- supervisor validation: branch completion is checked before final commit
 
-```bash
-python cli/agenttree.py status agenttree-live-demo
-python cli/agenttree.py events agenttree-live-demo --after-seq 0
-python cli/agenttree.py stop agenttree-live-demo --branch order-agent
-```
+This gives the project a clear operational pattern: delegate, validate, stage, and commit.
 
-## Model-driven worker tasks
+## Model-driven demo configuration
 
-To launch managed workers with real Amazon Bedrock Converse calls, configure credentials in the shell that starts the backend and set the region/model if needed:
+To run the live Bedrock-backed flow, configure AWS credentials in the shell used to start the backend:
 
 ```bash
 export AWS_REGION=us-east-1
 export AWS_BEDROCK_MODEL_ID=amazon.nova-micro-v1:0
 ```
 
-The AWS identity needs permission to call the selected Bedrock model. Use the existing credential helper only in a trusted local environment; never commit its output, credential files, or terminal transcripts. Launch a run and assign a task to a child role:
+The selected AWS identity must have permission to call the configured Bedrock model.
+
+## Useful commands
 
 ```bash
-python cli/agenttree.py run model-run \
-  --task 'order-agent=Review order ORD-882 and summarize the allowed refund action.'
-python cli/agenttree.py status model-run
-python cli/agenttree.py events model-run
-python cli/agenttree.py stop model-run
+python cli/agenttree.py reset agenttree-live-demo
+python cli/agenttree.py status agenttree-live-demo
+python cli/agenttree.py events agenttree-live-demo --after-seq 0
+python cli/agenttree.py stop agenttree-live-demo --branch order-agent
 ```
-
-Workers receive no AWS credentials. The backend calls Bedrock and routes proposed tools back through the same role policy and gateway. Account's `modify_billing` schema is visible only to let the live security scenario demonstrate a real model-proposed but unauthorized tool call; it is absent from the trusted Account role policy and is rejected by the gateway.
 
 ## Validation
 
@@ -103,19 +108,22 @@ From the repository root:
 pytest -q backend/tests
 ```
 
-From `frontend/`:
+From the frontend directory:
 
 ```bash
 npm test
 npm run build
 ```
 
-The controlled acceptance flow verifies `stage_refund $45 → COMMITTED`, `stage_promo_credit $50 → ABORTED`, committed promo credit `$0`, branch-specific process termination, and continued Order branch activity. Three consecutive controlled CLI rehearsals and a full Bedrock-driven live run were completed against the local API. The `demo` command runs the live path by default.
+The repository includes a deterministic acceptance flow and a real live demo path. The no-AWS fallback validates the expected transaction behavior without requiring cloud resources.
 
 ## Scope and limits
 
-- Atomic commit applies only to the controlled SQLite transaction. Arbitrary external API operations are not atomic or automatically reversible.
-- AgentTree supervises processes it launches and enforces tools routed through its gateway. It is not a general operating-system sandbox.
-- Permissions come from the trusted server-side role policy; the model cannot grant itself access.
-- The live probe is explicitly requested as a red-team task and is generated as a real model tool call; this is not a claim of autonomous attack discovery or general prompt-injection detection.
-- Optional AWS event export is separate from the core local audit trail; the deterministic workflow does not need a cloud database or CloudWatch.
+- The commit model applies to the local transactional workflow used by the application.
+- AgentTree manages processes it launches and enforces the tool calls that go through its gateway.
+- Permission decisions are controlled by server-side policies, not by the model itself.
+- The cloud-backed demo depends on valid AWS credentials, model access, and region configuration.
+
+## License
+
+This project is provided for learning, demonstration, and experimentation. Use it as a local reference implementation for agent governance patterns and workflow orchestration.
