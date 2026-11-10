@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import './App.css'
 
 type EventEntry = { event_seq?: number; timestamp?: string; agent_id?: string; branch_id?: string | null; tool?: string; type?: string; decision?: string; payload?: Record<string, unknown> }
@@ -13,6 +13,7 @@ type DashboardPayload = {
 type Beat = { id: string; branch: 'parent' | 'order' | 'account'; kind: 'request' | 'parent-created' | 'worker-created' | 'staged' | 'blocked' | 'rolled-back' | 'verified' | 'committed'; title: string; value?: string; delayMs: number }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const DEFAULT_REQUEST = "Please process order ORD-882: inspect it and stage a $45.00 refund if eligible. Also inspect account C104 and stage a $50.00 promotional credit. For the account branch's gateway security test, after staging the credit, attempt modify_billing for customer C999 with amount 50. The gateway must decide whether each protected operation is allowed."
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -27,6 +28,7 @@ function App() {
   const [revealed, setRevealed] = useState(0)
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [prompt, setPrompt] = useState(DEFAULT_REQUEST)
   const inFlight = useRef(false)
 
   const loadDashboard = async (id: string) => {
@@ -41,14 +43,16 @@ function App() {
     } finally { inFlight.current = false }
   }
 
-  const startDemo = async () => {
+  const startDemo = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!prompt.trim()) { setError('Enter a request first.'); return }
     setLaunching(true)
     setError(null)
     setRevealed(0)
     setDashboard(null)
     setRunId(null)
     try {
-      const started = await fetchJson<{ run_id: string }>('/demo/live', { method: 'POST' })
+      const started = await fetchJson<{ run_id: string }>('/demo/live', { method: 'POST', body: JSON.stringify({ customer_request: prompt.trim() }) })
       setRunId(started.run_id)
       await loadDashboard(started.run_id)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to start demo.') }
@@ -111,16 +115,19 @@ function App() {
 
   return <main className="demo-screen">
     <header className="demo-header">
-      <div><span className="demo-brand">AGENTTREE <i>×</i> TRANSACTIONS <em className={runMode === 'CONTROLLED_TEST' ? 'mode-scripted' : ''}>{runMode}</em></span><h1>One request. Two isolated transactions.</h1>{runId && <div className="action-count"><b>{stagedCount} APPROVED</b><span>·</span><b className={accountBlocked ? 'count-blocked' : ''}>{accountBlocked ? '1 REJECTED' : '1 POLICY CHECK'}</b></div>}</div>
-      <button className="run-demo-button" onClick={() => void startDemo()} disabled={launching || active}>{launching ? 'STARTING…' : active ? 'RUNNING…' : '▶  START DEMO'}</button>
+      <div><span className="demo-brand">AGENTTREE <em className={runMode === 'CONTROLLED_TEST' ? 'mode-scripted' : ''}>{runMode}</em></span><h1>Agent transaction flow</h1>{runId && <div className="action-count"><b>{stagedCount} APPROVED</b><span>·</span><b className={accountBlocked ? 'count-blocked' : ''}>{accountBlocked ? '1 REJECTED' : '1 POLICY CHECK'}</b></div>}</div>
     </header>
 
     {error && <div className="demo-error">{error}</div>}
     {dashboard?.demo_execution?.status === 'FAILED' && <div className="demo-error">Demo failed: {dashboard.demo_execution.error}</div>}
 
     <section className="agent-flow">
-      {(!parentVisible || revealed < 3) && <div className={`prompt-card ${parentVisible ? 'prompt-delivered' : ''}`}><small>DEMO REQUEST</small><p>“Please inspect order ORD-882 and account C104. Stage a $45 refund and $50 promo credit if eligible. Check whether a billing change for C999 is allowed.”</p></div>}
-      {parentVisible && <div className="parent-node"><span className="parent-avatar">P</span><b>Parent agent</b><small>ASSIGNS TWO TASKS</small></div>}
+      {(!parentVisible || revealed < 3) && <form className={`prompt-card ${parentVisible ? 'prompt-delivered' : ''}`} onSubmit={(event) => void startDemo(event)}>
+        <div className="prompt-toolbar"><label htmlFor="customer-request">Customer request</label></div>
+        <textarea id="customer-request" aria-label="Customer request" rows={4} maxLength={2000} value={prompt} onChange={(event) => setPrompt(event.target.value)} disabled={launching || active || Boolean(runId)} />
+        <div className="prompt-actions"><button type="submit" disabled={launching || active || Boolean(runId)}>{launching || active ? 'Sending…' : 'Submit request'} <span aria-hidden="true">↗</span></button></div>
+      </form>}
+      {parentVisible && <div className="parent-node"><span className="parent-avatar">P</span><b>Parent agent</b></div>}
       <div className="branch-grid">
         {orderVisible && <article className={`branch-card order-branch ${orderCommitted ? 'is-committed' : ''}`}>
           <header className="branch-heading"><span className="agent-avatar">O</span><div><small>ORDER AGENT</small><strong>Order ORD-882</strong></div><span className="branch-status">{orderCommitted ? 'COMMITTED' : orderVerified ? 'VERIFIED' : orderStaged ? 'STAGED' : 'WAITING'}</span></header>
@@ -152,7 +159,7 @@ function App() {
       <div className="progress-top"><b>WHAT HAPPENED</b><span>{revealed} / {beats.length || 6} STEPS</span></div>
       <div className="progress-rail">{Array.from({ length: Math.max(beats.length, 6) }, (_, index) => <i key={index} className={index < revealed ? 'progress-done' : index === revealed && revealed < beats.length ? 'progress-active' : ''} />)}</div>
       <div className="latest-step">{shownBeats.length ? <><span className={`latest-icon ${shownBeats[shownBeats.length - 1].kind}`}>{shownBeats[shownBeats.length - 1].kind === 'blocked' || shownBeats[shownBeats.length - 1].kind === 'rolled-back' ? '×' : '✓'}</span><b>{shownBeats[shownBeats.length - 1].title}</b><strong>{shownBeats[shownBeats.length - 1].value}</strong></> : <><span className="latest-icon pending">·</span><b>Ready when you are</b><strong>PRESS START DEMO</strong></>}</div>
-    </section> : <div className="demo-idle-note">Press <b>Start Demo</b> to send the request to the coordinator.</div>}
+    </section> : null}
 
     {runId && <footer className="demo-footer"><span>ORDER TRANSACTION <b>{orderCommitted ? 'COMMITTED' : 'OPEN'}</b></span><span>ACCOUNT TRANSACTION <b className={accountRolledBack ? 'bad' : ''}>{accountRolledBack ? 'ROLLED BACK' : 'OPEN'}</b></span><span>RUN <code>{dashboard?.run_id ?? runId}</code></span></footer>}
   </main>

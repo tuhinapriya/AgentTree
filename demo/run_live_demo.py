@@ -59,6 +59,7 @@ def run_live_demo(
     base_url: str = "http://127.0.0.1:8000",
     run_id: str = DEFAULT_RUN_ID,
     timeout_seconds: int = 120,
+    customer_request: str = CUSTOMER_REQUEST,
 ) -> dict:
     """Delegate with Bedrock, let child workers call tools, then commit Order."""
     base_url = base_url.rstrip("/")
@@ -69,7 +70,7 @@ def run_live_demo(
             "POST",
             base_url,
             f"/runs/{run_id}/bedrock/delegate",
-            {"parent_agent_id": "parent-agent", "customer_request": CUSTOMER_REQUEST},
+            {"parent_agent_id": "parent-agent", "customer_request": customer_request},
         )
         if delegation.get("origin") != "MODEL":
             raise RuntimeError(

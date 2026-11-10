@@ -35,19 +35,19 @@ beforeEach(() => {
 
 test('refresh opens an idle request screen without fetching or starting a run', async () => {
   render(<App />)
-  expect(await screen.findByRole('heading', { name: /one request\. two isolated transactions/i })).toBeInTheDocument()
-  expect(screen.getByText('DEMO REQUEST')).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: /agent transaction flow/i })).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: /customer request/i })).toBeInTheDocument()
   expect(screen.queryByText('Parent agent')).not.toBeInTheDocument()
   expect(screen.queryByText('ORDER AGENT')).not.toBeInTheDocument()
   expect(screen.queryByText('ACCOUNT AGENT')).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: /start demo/i })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /submit request/i })).toBeInTheDocument()
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test('reveals staged, blocked, rolled-back, and committed outcomes in sequence', async () => {
   const user = userEvent.setup()
   render(<App />)
-  await user.click(screen.getByRole('button', { name: /start demo/i }))
+  await user.click(screen.getByRole('button', { name: /submit request/i }))
 
   expect(await screen.findByText('Refund committed', {}, { timeout: 15000 })).toBeInTheDocument()
   expect(screen.getByText('Parent agent')).toBeInTheDocument()
@@ -66,6 +66,6 @@ test('reveals staged, blocked, rolled-back, and committed outcomes in sequence',
 test('run demo starts a fresh live run', async () => {
   const user = userEvent.setup()
   render(<App />)
-  await user.click(await screen.findByRole('button', { name: /start demo/i }))
-  expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/demo/live'), expect.objectContaining({ method: 'POST' }))
+  await user.click(await screen.findByRole('button', { name: /submit request/i }))
+  expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/demo/live'), expect.objectContaining({ method: 'POST', body: expect.stringContaining('customer_request') }))
 })

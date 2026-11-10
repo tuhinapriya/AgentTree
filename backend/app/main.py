@@ -29,6 +29,10 @@ class AgentCreate(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
 
 
+class DemoStart(BaseModel):
+    customer_request: str = Field(min_length=1, max_length=2000)
+
+
 def build_app(database_path: Optional[str] = None) -> FastAPI:
     database = AgentTreeDB(database_path)
     service = HierarchyService(database)
@@ -67,12 +71,12 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    def execute_live_demo(run_id: str, base_url: str) -> None:
+    def execute_live_demo(run_id: str, base_url: str, customer_request: str) -> None:
         demo_jobs[run_id] = {"status": "RUNNING", "started_at": datetime.now(timezone.utc).isoformat()}
         try:
             from demo.run_live_demo import run_live_demo
 
-            run_live_demo(base_url, run_id)
+            run_live_demo(base_url, run_id, customer_request=customer_request)
             demo_jobs[run_id] = {
                 "status": "SUCCEEDED",
                 "started_at": demo_jobs[run_id]["started_at"],
@@ -100,14 +104,23 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
                 }
 
     @app.post("/demo/live")
-    def start_live_demo(background_tasks: BackgroundTasks, request: Request) -> dict[str, str]:
+    def start_live_demo(
+        background_tasks: BackgroundTasks,
+        request: Request,
+        payload: Optional[DemoStart] = None,
+    ) -> dict[str, str]:
+        customer_request = payload.customer_request.strip() if payload else ""
+        if not customer_request:
+            from demo.run_live_demo import CUSTOMER_REQUEST
+
+            customer_request = CUSTOMER_REQUEST
         run_id = f"agenttree-live-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
         try:
             service.create_run(run_id, "customer-104-bedrock-live")
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         demo_jobs[run_id] = {"status": "STARTING", "started_at": datetime.now(timezone.utc).isoformat()}
-        background_tasks.add_task(execute_live_demo, run_id, str(request.base_url).rstrip("/"))
+        background_tasks.add_task(execute_live_demo, run_id, str(request.base_url).rstrip("/"), customer_request)
         return {"run_id": run_id, "status": "STARTING"}
 
     @app.post("/demo/mock")
