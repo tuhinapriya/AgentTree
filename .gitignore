@@ -23,6 +23,9 @@ htmlcov/
 .envrc
 !.env.example
 
+# Personal planning notes (keep out of the repository)
+**/*[pP][lL][aA][nN]*.[mM][dD]
+
 # Local secret material
 *.pem
 *.key
