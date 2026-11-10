@@ -1,19 +1,20 @@
 # AgentTree
 
-AgentTree is a transactional governance framework for multi-agent AI systems. It demonstrates how autonomous agents can operate within scoped permissions, validate tool usage, and commit approved business actions only after verification.
+AgentTree is a transactional governance framework for multi-agent AI systems. It routes protected tool calls through a trusted gateway, stages approved effects, and only commits them after policy and completion checks pass.
 
-The project models a customer-transaction workflow with a coordinator agent and specialized Order and Account worker agents. Protected operations are routed through a trusted gateway, staged before they are applied, and only committed when the system confirms they are valid and safe. If a branch violates its policy, the system aborts its pending change and keeps the rest of the workflow running.
+The project models a customer-transaction workflow using a coordinator agent and specialized Order and Account worker agents. Each branch records its effects, validates task completion, and aborts unsafe or out-of-scope work while preserving the rest of the workflow. A live dashboard visualizes the runtime hierarchy, tool decisions, staged impacts, and final business state in real time.
 
-A live dashboard visualizes the agent hierarchy, tool decisions, staged effects, and final business state in real time. The default demo path can run against Amazon Bedrock when AWS credentials and model access are available, and a deterministic no-AWS fallback is also included for local validation and demo scenarios.
+The system supports both a Bedrock-backed live demo path and a deterministic no-AWS fallback for local validation and presentation scenarios.
 
 ## Why this project matters
 
-Modern AI systems often need more than prompt execution. They need:
+Modern AI systems require more than prompt execution. They need:
 
-- role-based access control for protected actions
-- verified task completion before commit
-- isolation of unsafe or out-of-scope tool actions
-- clear visibility into how decisions are made and recorded
+- role-based authorization for protected actions
+- execution checkpoints before a change is committed
+- isolation of unsafe or out-of-scope tool calls
+- observable runtime state across agent branches
+- policy enforcement that is independent of the model itself
 
 AgentTree is designed to explore that operational layer directly. It treats agent workflows as transactional systems rather than uncontrolled tool invocations.
 
@@ -22,7 +23,7 @@ AgentTree is designed to explore that operational layer directly. It treats agen
 - Python 3.11 or newer
 - Node.js 20 or newer and npm
 - AWS credentials and Bedrock model access for the live model-driven flow
-- An optional no-AWS deterministic demo fallback for local use without cloud access
+- Optional no-AWS deterministic fallback for local validation and demos
 
 ## Install
 
@@ -70,7 +71,7 @@ python cli/agenttree.py demo --controlled
 
 ## Architecture overview
 
-The system is organized around a few core concepts:
+The system is organized around a few core execution patterns:
 
 - coordinator delegation: a parent agent splits customer work into tasks
 - branch execution: worker agents perform scoped actions and record effects
@@ -78,7 +79,7 @@ The system is organized around a few core concepts:
 - staged transactions: valid changes are prepared before being committed
 - supervisor validation: branch completion is checked before final commit
 
-This gives the project a clear operational pattern: delegate, validate, stage, and commit.
+This yields a clear operational flow: delegate, validate, stage, and commit.
 
 ## Model-driven demo configuration
 
@@ -115,12 +116,12 @@ npm test
 npm run build
 ```
 
-The repository includes a deterministic acceptance flow and a real live demo path. The no-AWS fallback validates the expected transaction behavior without requiring cloud resources.
+The repository includes both a deterministic acceptance flow and a live Bedrock-backed execution path. The no-AWS fallback validates the expected transaction behavior without requiring cloud resources.
 
 ## Scope and limits
 
 - The commit model applies to the local transactional workflow used by the application.
-- AgentTree manages processes it launches and enforces the tool calls that go through its gateway.
+- AgentTree manages processes it launches and enforces the tool calls that pass through its gateway.
 - Permission decisions are controlled by server-side policies, not by the model itself.
 - The cloud-backed demo depends on valid AWS credentials, model access, and region configuration.
 
