@@ -13,7 +13,19 @@ htmlcov/
 # Local credentials and environment configuration
 .env
 .env.*
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+.envrc
 !.env.example
+
+# Local secret material
+*.pem
+*.key
 
 # Frontend build output and local tooling
 /frontend/node_modules/

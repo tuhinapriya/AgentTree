@@ -68,7 +68,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(`Request failed for ${path}: ${response.status}`)
   return (await response.json()) as T
 }
-const DEMO_RUN_FALLBACKS = ['agenttree-live-demo', 'agenttree-transactional-demo', 'run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
+const DEMO_RUN_FALLBACKS = ['agenttree-transactional-demo', 'agenttree-live-demo', 'run-demo-verify', 'run-demo-security', 'run-demo', 'demo-run']
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 const shortTime = (value?: string) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
 const fullTime = (value?: string) => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : 'Time unavailable'
@@ -113,12 +113,12 @@ function App() {
     setLaunchingDemo(true)
     setError(null)
     try {
-      const started = await fetchJson<{ run_id: string }>('/demo/live', { method: 'POST' })
+      const started = await fetchJson<{ run_id: string }>('/demo/mock', { method: 'POST' })
       runIdRef.current = started.run_id
       setRunId(started.run_id)
       await loadDashboard(started.run_id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to start the live demo.')
+      setError(e instanceof Error ? e.message : 'Unable to start the demo.')
     } finally {
       setLaunchingDemo(false)
     }
@@ -195,7 +195,7 @@ function App() {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand-lockup"><div className="brand-mark">A</div><div><p className="eyebrow">AgentTree / Runtime security</p><h1>Customer transaction demo</h1></div></div>
-      <div className="header-actions"><span className="run-id-label">{dashboard?.run_id ?? runId}</span><button type="button" className="run-demo-button" title="Starts a fresh Bedrock run and keeps previous run history." onClick={() => void handleStartLiveDemo()} disabled={launchingDemo || demoIsActive}>{launchingDemo || demoIsActive ? 'Live run starting…' : 'Run demo again'}</button></div>
+      <div className="header-actions"><span className="run-id-label">{dashboard?.run_id ?? runId}</span><button type="button" className="run-demo-button" title="Starts a fresh demo run and keeps previous run history." onClick={() => void handleStartLiveDemo()} disabled={launchingDemo || demoIsActive}>{launchingDemo || demoIsActive ? 'Demo run starting…' : 'Run demo again'}</button></div>
     </header>
     {error ? <div className="error-banner" role="alert">{error}</div> : null}
     {dashboard?.demo_execution?.status === 'FAILED' && <div className="error-banner" role="alert">Live demo failed: {dashboard.demo_execution.error}</div>}

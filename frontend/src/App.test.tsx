@@ -104,7 +104,7 @@ test('loads the transactional demo run by default', async () => {
   render(<App />)
 
   expect(fetchMock).toHaveBeenCalledWith(
-    expect.stringContaining('/runs/agenttree-live-demo/dashboard'),
+    expect.stringContaining('/runs/agenttree-transactional-demo/dashboard'),
     expect.any(Object),
   )
 })
@@ -115,7 +115,7 @@ test('renders the tree, database result, and timeline', async () => {
   expect(await screen.findByRole('heading', { name: /customer transaction demo/i })).toBeInTheDocument()
   expect(screen.getByText(/3 registered · 1 parent · 2 child agents/i)).toBeInTheDocument()
   expect(screen.getByRole('heading', { name: /final database state/i })).toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: /timeline/i })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: /live agent activity/i })).toBeInTheDocument()
 })
 
 test('selecting an agent shows its effective permissions', async () => {

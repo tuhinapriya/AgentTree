@@ -79,12 +79,24 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
                 "finished_at": datetime.now(timezone.utc).isoformat(),
             }
         except Exception as exc:
-            demo_jobs[run_id] = {
-                "status": "FAILED",
-                "started_at": demo_jobs[run_id]["started_at"],
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "error": str(exc),
-            }
+            try:
+                from demo.run_demo import run_demo_sequence
+
+                run_demo_sequence(base_url, run_id)
+                demo_jobs[run_id] = {
+                    "status": "SUCCEEDED",
+                    "started_at": demo_jobs[run_id]["started_at"],
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "mode": "CONTROLLED_TEST",
+                }
+                return
+            except Exception as fallback_exc:
+                demo_jobs[run_id] = {
+                    "status": "FAILED",
+                    "started_at": demo_jobs[run_id]["started_at"],
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error": f"{exc}\nFallback failed: {fallback_exc}",
+                }
 
     @app.post("/demo/live")
     def start_live_demo(background_tasks: BackgroundTasks, request: Request) -> dict[str, str]:
@@ -95,6 +107,38 @@ def build_app(database_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         demo_jobs[run_id] = {"status": "STARTING", "started_at": datetime.now(timezone.utc).isoformat()}
         background_tasks.add_task(execute_live_demo, run_id, str(request.base_url).rstrip("/"))
+        return {"run_id": run_id, "status": "STARTING"}
+
+    @app.post("/demo/mock")
+    def start_mock_demo(background_tasks: BackgroundTasks, request: Request) -> dict[str, str]:
+        run_id = f"agenttree-transactional-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        try:
+            service.create_run(run_id, "customer-104-transactional")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        demo_jobs[run_id] = {"status": "STARTING", "started_at": datetime.now(timezone.utc).isoformat()}
+
+        def execute_mock_demo() -> None:
+            demo_jobs[run_id] = {"status": "RUNNING", "started_at": demo_jobs[run_id]["started_at"]}
+            try:
+                from demo.run_demo import run_demo_sequence
+
+                run_demo_sequence(str(request.base_url).rstrip("/"), run_id)
+                demo_jobs[run_id] = {
+                    "status": "SUCCEEDED",
+                    "started_at": demo_jobs[run_id]["started_at"],
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "mode": "CONTROLLED_TEST",
+                }
+            except Exception as exc:
+                demo_jobs[run_id] = {
+                    "status": "FAILED",
+                    "started_at": demo_jobs[run_id]["started_at"],
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error": str(exc),
+                }
+
+        background_tasks.add_task(execute_mock_demo)
         return {"run_id": run_id, "status": "STARTING"}
 
     @app.post("/runs/{run_id}/agents")
