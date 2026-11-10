@@ -4,7 +4,17 @@ AgentTree is a transactional governance framework for multi-agent AI systems. It
 
 The project models a customer-transaction workflow using a coordinator agent and specialized Order and Account worker agents. Each branch records its effects, validates task completion, and aborts unsafe or out-of-scope work while preserving the rest of the workflow. A live dashboard visualizes the runtime hierarchy, tool decisions, staged impacts, and final business state in real time.
 
-The system supports both a Bedrock-backed live demo path and a deterministic no-AWS fallback for local validation and presentation scenarios.
+The system supports both an Amazon Bedrock-backed live demo path and a deterministic no-AWS fallback for local validation and presentation scenarios. It is built with FastAPI, React + Vite, SQLite-backed state management, and AWS-oriented observability patterns for real-world agent execution tracing.
+
+## Technology stack
+
+- Python + FastAPI for the backend orchestration layer
+- React + Vite for the live operational dashboard
+- SQLite for run state, agent hierarchy, and transactional records
+- Amazon Bedrock for model-backed delegation and runtime reasoning
+- AWS credentials, IAM identity, and region configuration for live cloud execution
+- AWS observability patterns for event capture, export, and runtime auditing
+- Controlled local fallback mode for demos when AWS access is unavailable
 
 ## Why this project matters
 
