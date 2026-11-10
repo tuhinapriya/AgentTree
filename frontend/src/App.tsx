@@ -13,7 +13,6 @@ type DashboardPayload = {
 type Beat = { id: string; branch: 'parent' | 'order' | 'account'; kind: 'request' | 'parent-created' | 'worker-created' | 'staged' | 'blocked' | 'rolled-back' | 'verified' | 'committed'; title: string; value?: string; delayMs: number }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
-const FALLBACK_RUN = 'agenttree-transactional-demo'
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -23,15 +22,14 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function App() {
-  const [runId, setRunId] = useState(FALLBACK_RUN)
+  const [runId, setRunId] = useState<string | null>(null)
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
   const [revealed, setRevealed] = useState(0)
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const runIdRef = useRef(runId)
   const inFlight = useRef(false)
 
-  const loadDashboard = async (id = runIdRef.current) => {
+  const loadDashboard = async (id: string) => {
     if (inFlight.current) return
     inFlight.current = true
     try {
@@ -47,21 +45,21 @@ function App() {
     setLaunching(true)
     setError(null)
     setRevealed(0)
+    setDashboard(null)
+    setRunId(null)
     try {
       const started = await fetchJson<{ run_id: string }>('/demo/live', { method: 'POST' })
-      runIdRef.current = started.run_id
       setRunId(started.run_id)
-      setDashboard(null)
       await loadDashboard(started.run_id)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to start demo.') }
     finally { setLaunching(false) }
   }
 
-  useEffect(() => { void loadDashboard() }, [])
   useEffect(() => {
-    const timer = window.setInterval(() => { void loadDashboard() }, 350)
+    if (!runId || ['SUCCEEDED', 'FAILED'].includes(dashboard?.demo_execution?.status ?? '')) return
+    const timer = window.setInterval(() => { void loadDashboard(runId) }, 350)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [runId, dashboard?.demo_execution?.status])
 
   const events = dashboard?.events ?? []
   const eventSignature = events.map((event) => [event.event_seq, event.type, event.tool, event.decision, event.branch_id, event.agent_id].join(':')).join('|')
@@ -91,7 +89,7 @@ function App() {
   }, [eventSignature])
 
   useEffect(() => {
-    if (revealed >= beats.length) return
+    if (!runId || revealed >= beats.length) return
     const timer = window.setTimeout(() => setRevealed((current) => Math.min(current + 1, beats.length)), beats[revealed]?.delayMs ?? 850)
     return () => window.clearTimeout(timer)
   }, [beats.length, revealed, runId])
@@ -108,13 +106,13 @@ function App() {
   const accountStaged = shownBeats.some((beat) => beat.branch === 'account' && beat.kind === 'staged')
   const stagedCount = shownBeats.filter((beat) => beat.kind === 'staged').length
   const active = ['STARTING', 'RUNNING'].includes(dashboard?.demo_execution?.status ?? '')
-  const runMode = dashboard?.demo_execution?.mode ?? (active ? 'BEDROCK ATTEMPT' : 'RUN VIEW')
+  const runMode = dashboard?.demo_execution?.mode ?? (active ? 'BEDROCK ATTEMPT' : runId ? 'RUN VIEW' : 'READY')
   const state = dashboard?.business_state
 
   return <main className="demo-screen">
     <header className="demo-header">
-      <div><span className="demo-brand">AGENTTREE <i>×</i> TRANSACTIONS <em className={runMode === 'CONTROLLED_TEST' ? 'mode-scripted' : ''}>{runMode}</em></span><h1>One request. Two isolated transactions.</h1><div className="action-count"><b>{stagedCount} APPROVED</b><span>·</span><b className={accountBlocked ? 'count-blocked' : ''}>{accountBlocked ? '1 REJECTED' : '1 POLICY CHECK'}</b></div></div>
-      <button className="run-demo-button" onClick={() => void startDemo()} disabled={launching || active}>{launching || active ? 'RUNNING…' : '▶  RUN DEMO'}</button>
+      <div><span className="demo-brand">AGENTTREE <i>×</i> TRANSACTIONS <em className={runMode === 'CONTROLLED_TEST' ? 'mode-scripted' : ''}>{runMode}</em></span><h1>One request. Two isolated transactions.</h1>{runId && <div className="action-count"><b>{stagedCount} APPROVED</b><span>·</span><b className={accountBlocked ? 'count-blocked' : ''}>{accountBlocked ? '1 REJECTED' : '1 POLICY CHECK'}</b></div>}</div>
+      <button className="run-demo-button" onClick={() => void startDemo()} disabled={launching || active}>{launching ? 'STARTING…' : active ? 'RUNNING…' : '▶  START DEMO'}</button>
     </header>
 
     {error && <div className="demo-error">{error}</div>}
@@ -150,13 +148,13 @@ function App() {
       </div>
     </section>
 
-    <section className="demo-progress" aria-live="polite">
+    {runId ? <section className="demo-progress" aria-live="polite">
       <div className="progress-top"><b>WHAT HAPPENED</b><span>{revealed} / {beats.length || 6} STEPS</span></div>
       <div className="progress-rail">{Array.from({ length: Math.max(beats.length, 6) }, (_, index) => <i key={index} className={index < revealed ? 'progress-done' : index === revealed && revealed < beats.length ? 'progress-active' : ''} />)}</div>
-      <div className="latest-step">{shownBeats.length ? <><span className={`latest-icon ${shownBeats[shownBeats.length - 1].kind}`}>{shownBeats[shownBeats.length - 1].kind === 'blocked' || shownBeats[shownBeats.length - 1].kind === 'rolled-back' ? '×' : '✓'}</span><b>{shownBeats[shownBeats.length - 1].title}</b><strong>{shownBeats[shownBeats.length - 1].value}</strong></> : <><span className="latest-icon pending">·</span><b>Agents ready</b><strong>START THE RUN</strong></>}</div>
-    </section>
+      <div className="latest-step">{shownBeats.length ? <><span className={`latest-icon ${shownBeats[shownBeats.length - 1].kind}`}>{shownBeats[shownBeats.length - 1].kind === 'blocked' || shownBeats[shownBeats.length - 1].kind === 'rolled-back' ? '×' : '✓'}</span><b>{shownBeats[shownBeats.length - 1].title}</b><strong>{shownBeats[shownBeats.length - 1].value}</strong></> : <><span className="latest-icon pending">·</span><b>Ready when you are</b><strong>PRESS START DEMO</strong></>}</div>
+    </section> : <div className="demo-idle-note">Press <b>Start Demo</b> to send the request to the coordinator.</div>}
 
-    <footer className="demo-footer"><span>ORDER TRANSACTION <b>{orderCommitted ? 'COMMITTED' : 'OPEN'}</b></span><span>ACCOUNT TRANSACTION <b className={accountRolledBack ? 'bad' : ''}>{accountRolledBack ? 'ROLLED BACK' : 'OPEN'}</b></span><span>RUN <code>{dashboard?.run_id ?? runId}</code></span></footer>
+    {runId && <footer className="demo-footer"><span>ORDER TRANSACTION <b>{orderCommitted ? 'COMMITTED' : 'OPEN'}</b></span><span>ACCOUNT TRANSACTION <b className={accountRolledBack ? 'bad' : ''}>{accountRolledBack ? 'ROLLED BACK' : 'OPEN'}</b></span><span>RUN <code>{dashboard?.run_id ?? runId}</code></span></footer>}
   </main>
 }
 
