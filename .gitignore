@@ -25,6 +25,7 @@ htmlcov/
 
 # Personal planning notes (keep out of the repository)
 **/*[pP][lL][aA][nN]*.[mM][dD]
+AWS_INTEGRATION_UPDATE.md
 
 # Local secret material
 *.pem
