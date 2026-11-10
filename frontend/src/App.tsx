@@ -72,6 +72,27 @@ const DEMO_RUN_FALLBACKS = ['agenttree-transactional-demo', 'agenttree-live-demo
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 const shortTime = (value?: string) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
 const fullTime = (value?: string) => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : 'Time unavailable'
+const humanizeToolName = (tool?: string) => {
+  if (!tool) return 'tool action'
+  return tool
+    .replaceAll('_', ' ')
+    .replace(/\b(?:read|stage|modify|commit|delegate|verify)\b/gi, (match) => match.toLowerCase() === 'read' ? 'read' : match.toLowerCase() === 'stage' ? 'stage' : match.toLowerCase() === 'modify' ? 'modify' : match.toLowerCase() === 'commit' ? 'commit' : match.toLowerCase() === 'delegate' ? 'delegate' : 'verify')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+const getSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'MODEL':
+      return 'AI model'
+    case 'CONTROLLED_TEST':
+      return 'Runtime engine'
+    case 'SUPERVISOR':
+      return 'Safety checkpoint'
+    case 'OPERATOR':
+      return 'Operator'
+    default:
+      return 'System'
+  }
+}
 
 function App() {
   const [runId, setRunId] = useState(DEMO_RUN_FALLBACKS[0])
@@ -140,7 +161,7 @@ function App() {
   const timeline = useMemo(() => {
     const items: TimelineItem[] = []
     const processStarts = agents.map((agent) => agent.process_create_time).filter((value): value is string => Boolean(value)).sort()
-    if (processStarts.length) items.push({ at: processStarts[0], title: 'Agents launched', detail: `${agents.length} configured agents started`, state: 'info', source: 'Supervisor' })
+    if (processStarts.length) items.push({ at: processStarts[0], title: 'Agents launched', detail: `${agents.length} configured agents started`, state: 'info', source: 'SUPERVISOR' })
     else if (dashboard?.run?.created_at) items.push({ at: dashboard.run.created_at, title: 'Run configured', detail: `${agents.length} agents registered`, state: 'info' })
     for (const event of events) {
       if (!event.timestamp) continue
@@ -150,13 +171,13 @@ function App() {
       const effectLabel = effect ? `${money(Number(effect.arguments.amount_cents ?? 0))} ${effect.tool === 'stage_refund' ? 'refund' : 'promotional credit'}` : 'Pending changes'
       if (event.tool === 'bedrock.delegate') items.push({ at: event.timestamp, title: 'Parent delegated work', detail: 'Tasks assigned to child agents.', state: 'info', source: event.origin })
       else if (event.tool === 'worker.complete') items.push({ at: event.timestamp, title: `${displayName} finished its task`, detail: 'Worker reported successful completion.', state: 'ready', source: event.origin })
-      else if (event.type === 'TOOL_DECISION' && event.tool !== 'bedrock.converse') items.push({ at: event.timestamp, title: `${displayName} · ${event.tool ?? 'tool call'}`, detail: event.decision === 'DENY' ? 'This tool is outside the agent’s permissions.' : 'Gateway allowed this tool call.', state: event.decision === 'DENY' ? 'denied' : 'allowed', source: event.origin })
+      else if (event.type === 'TOOL_DECISION' && event.tool !== 'bedrock.converse') items.push({ at: event.timestamp, title: `${displayName} · ${humanizeToolName(event.tool)}`, detail: event.decision === 'DENY' ? 'This tool is outside the agent’s permissions.' : 'Gateway allowed this tool call.', state: event.decision === 'DENY' ? 'denied' : 'allowed', source: event.origin })
       else if (event.type === 'TOOL_STAGED') items.push({ at: event.timestamp, title: 'Change staged', detail: `${event.tool === 'stage_refund' ? 'Refund' : 'Promotional credit'} · ${money(Number(event.payload?.amount_cents ?? 0))}`, state: 'staged', agent: displayName, source: event.origin })
       else if (event.type === 'POLICY_VIOLATION_CONTAINED' || event.type === 'BRANCH_ABORTED') items.push({ at: event.timestamp, title: `${displayName} branch stopped`, detail: `${effectLabel} discarded after the blocked action.`, state: 'failed', agent: displayName, source: event.origin })
       else if (event.type === 'COMMIT_ELIGIBLE') items.push({ at: event.timestamp, title: `${displayName} passed completion checks`, detail: `${effectLabel} is ready to apply.`, state: 'ready', agent: displayName, source: event.origin })
       else if (event.type === 'BRANCH_COMMITTED') items.push({ at: event.timestamp, title: `${displayName} committed its change`, detail: `${effectLabel} applied to the database.`, state: 'committed', agent: displayName, source: event.origin })
     }
-    for (const effect of effects) if (effect.state === 'ABORTED' && !events.some((event) => event.type === 'POLICY_VIOLATION_CONTAINED' && event.branch_id === effect.branch_id)) items.push({ at: effect.created_at, title: 'Staged effect aborted', detail: effect.tool.replaceAll('_', ' '), state: 'failed', agent: effect.branch_id })
+    for (const effect of effects) if (effect.state === 'ABORTED' && !events.some((event) => event.type === 'POLICY_VIOLATION_CONTAINED' && event.branch_id === effect.branch_id)) items.push({ at: effect.created_at, title: 'Staged effect aborted', detail: humanizeToolName(effect.tool), state: 'failed', agent: effect.branch_id })
     return items.sort((a, b) => a.at.localeCompare(b.at))
   }, [agents, dashboard?.run, events, effects])
 
@@ -191,12 +212,22 @@ function App() {
     : selectedPolicy?.commit_on_verified_completion
       ? 'Commit only after task completion is verified'
       : 'Coordinates workers; no transactional tools'
+  const overallOutcome = blockedCalls > 0 ? 'Policy-contained' : effects.some((effect) => effect.state === 'COMMITTED') ? 'Verified flow' : 'Awaiting run'
 
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand-lockup"><div className="brand-mark">A</div><div><p className="eyebrow">AgentTree / Runtime security</p><h1>Customer transaction demo</h1></div></div>
       <div className="header-actions"><span className="run-id-label">{dashboard?.run_id ?? runId}</span><button type="button" className="run-demo-button" title="Starts a fresh demo run and keeps previous run history." onClick={() => void handleStartLiveDemo()} disabled={launchingDemo || demoIsActive}>{launchingDemo || demoIsActive ? 'Demo run starting…' : 'Run demo again'}</button></div>
     </header>
+
+    <div className="summary-strip">
+      <div><small>Run ID</small><strong>{dashboard?.run_id ?? runId}</strong></div>
+      <div><small>Agents</small><strong>{agents.length}</strong></div>
+      <div><small>Allowed</small><strong>{allowedCalls}</strong></div>
+      <div><small>Blocked</small><strong>{blockedCalls}</strong></div>
+      <div><small>Outcome</small><strong className="summary-status">{overallOutcome}</strong></div>
+    </div>
+
     {error ? <div className="error-banner" role="alert">{error}</div> : null}
     {dashboard?.demo_execution?.status === 'FAILED' && <div className="error-banner" role="alert">Live demo failed: {dashboard.demo_execution.error}</div>}
 
@@ -217,12 +248,25 @@ function App() {
 
     <section className="panel transaction-panel">
       <div className="panel-header"><div><h2>Final database state</h2></div></div>
-      <div className="record-results"><div><span>Order {state?.order.order_id ?? 'ORD-882'} · refund applied</span><strong>{money(state?.order.refunded_cents ?? 0)}</strong></div><div><span>Account {state?.account.customer_id ?? 'C104'} · committed credit</span><strong>{money(state?.account.promo_credit_cents ?? 0)}</strong></div></div>
+      <div className="record-results">
+        <div className="record-result-card order-card">
+          <span className="record-label">Order</span>
+          <strong>{state?.order.order_id ?? 'ORD-882'}</strong>
+          <small>Refund applied</small>
+          <b>{money(state?.order.refunded_cents ?? 0)}</b>
+        </div>
+        <div className="record-result-card account-card">
+          <span className="record-label">Account</span>
+          <strong>{state?.account.customer_id ?? 'C104'}</strong>
+          <small>Promotional credit</small>
+          <b>{money(state?.account.promo_credit_cents ?? 0)}</b>
+        </div>
+      </div>
     </section>
 
     <section className="panel run-story-panel">
       <div className="panel-header"><div><h2>Live agent activity</h2><p className="tree-caption">{toolCalls.length} tool calls · {allowedCalls} allowed · {blockedCalls} blocked</p></div><span className="live-indicator"><i className="live-dot" />Polling · {lastUpdated ? `updated ${shortTime(lastUpdated.toISOString())}` : 'connecting'}</span></div>
-      <ol className="run-timeline">{timeline.length === 0 ? <li className="empty-state">No activity yet. Start the live demo in a terminal with <code>python cli/agenttree.py demo</code>.</li> : timeline.map((item, index) => <li key={`${item.at}-${item.title}-${index}`} className={`timeline-${item.state}`}><span className="timeline-marker"/><time>{fullTime(item.at)}</time><div><strong>{item.title}</strong>{item.state === 'allowed' && <b className="call-decision allowed">ALLOWED</b>}{item.state === 'denied' && <b className="call-decision denied">BLOCKED</b>}{item.agent && <span className="timeline-agent">{item.agent}</span>}<p>{String(item.detail)}</p>{item.source && <small className="activity-source">{item.source === 'MODEL' ? 'Bedrock model' : item.source === 'CONTROLLED_TEST' ? 'Demo script' : item.source}</small>}</div></li>)}</ol>
+      <ol className="run-timeline">{timeline.length === 0 ? <li className="empty-state">No activity yet. Start a fresh run to begin the workflow.</li> : timeline.map((item, index) => <li key={`${item.at}-${item.title}-${index}`} className={`timeline-${item.state}`}><span className="timeline-marker"/><time>{fullTime(item.at)}</time><div><strong>{item.title}</strong>{item.state === 'allowed' && <b className="call-decision allowed">ALLOWED</b>}{item.state === 'denied' && <b className="call-decision denied">BLOCKED</b>}{item.agent && <span className="timeline-agent">{item.agent}</span>}<p>{String(item.detail)}</p>{item.source && <small className="activity-source">{getSourceLabel(item.source)}</small>}</div></li>)}</ol>
     </section>
   </div>
 }
